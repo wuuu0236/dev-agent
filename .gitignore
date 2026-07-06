@@ -1,0 +1,22 @@
+# 密钥 —— 绝对不能上传！
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+dist/
+
+# 向量库（二进制大文件，每次运行会重新生成）
+*.pkl
+chroma_db/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
