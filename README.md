@@ -1,50 +1,94 @@
-# Dev Agent —— 从零构建的开发助手 Agent
+# Dev Agent —— 开发助手 AI Agent
+
+基于 **LangGraph + FastAPI** 的 AI Agent，能操作本地文件、搜索知识库。支持 HTTP 调用和 Docker 一键部署。
+
+> 从 `while` 循环到 `StateGraph`，完整记录了 Agent 架构的演进过程。
+
+---
 
 ## 项目结构
+
 ```
 dev-agent/
 ├── src/
 │   ├── agent/
-│   │   ├── dev_agent.py       # v1: 基础 Agent 循环
-│   │   ├── dev_agent_v2.py    # v2: +logging +异常保护
-│   │   └── dev_agent_v3.py    # v3: +流式输出
-│   └── tools/
-│       ├── file_tools.py       # 文件系统工具（列目录、读文件、搜索）
-│       └── rag_tool.py         # RAG 工具（向量库、语义搜索、文档入库）
-├── tests/
-└── notes/
-    └── maxkb-vs-handwrite.md   # MaxKB 与手写 RAG 对比
+│   │   ├── dev_agent.py              # v1: 基础 Agent 循环（ReAct 模式）
+│   │   ├── dev_agent_v2.py           # v2: +logging +异常保护
+│   │   ├── dev_agent_v3.py           # v3: +流式输出
+│   │   └── dev_agent_langgraph.py    # v4: LangGraph StateGraph
+│   ├── tools/
+│   │   ├── file_tools.py             # 文件工具（list / read / search）
+│   │   └── rag_tool.py               # 向量知识库 + RAG 检索
+│   ├── api/
+│   │   └── server.py                 # FastAPI 服务（集成 LangGraph）
+│   └── mcp_server.py                 # MCP 协议工具服务器
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
 ```
 
-## 我学会了什么
+---
 
-### 1. Agent 的核心三要素
-- **LLM（大脑）**：调 DeepSeek API，不训练
-- **工具（手脚）**：普通 Python 函数 + JSON Schema 描述
-- **循环（决策链）**：while 循环，每轮决定「继续调工具」还是「回答」
+## 快速开始
 
-### 2. 工具调用全链路
-```
-用户提问 → messages 发给 AI → AI 返回 tool_calls
-→ 执行 Python 函数 → 结果塞回 messages
-→ 再发给 AI → 循环直到 AI 决定回答
+### 方式一：本地运行
+
+```bash
+pip install -r requirements.txt
+python src/api/server.py
+# 浏览器打开 http://localhost:8000/docs
 ```
 
-### 3. RAG = 向量化 + 检索
-- 向量就是坐标，语义相近的词坐标接近
-- Embedding 模型把文字转成坐标
-- 余弦相似度计算距离，越近越相关
+### 方式二：Docker 一键部署
 
-### 4. 企业级改进
-- print() → logging（可控制级别、可追溯）
-- 工具执行加 try-except（单个工具挂了不影响全局）
-- 流式输出（stream=True，打字机效果）
+```bash
+docker compose up
+# 浏览器打开 http://localhost:8000/docs
+```
 
-## MaxKB 对照
-MaxKB 的每个功能我都能在自己代码里找到对应实现。
-它是成熟产品，我写的是教学代码，但原理相同。
+---
+
+## API 使用
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "列出桌面的文件", "work_dir": "/app/host-desktop"}'
+```
+
+---
+
+## 架构演进
+
+| 版本 | 改进 | 解决的问题 |
+|:---:|------|------|
+| v1 | Agent 基础循环 | ReAct：思考 → 调工具 → 回答 |
+| v2 | logging + 异常保护 | 工具崩溃不连累 Agent |
+| v3 | 流式输出 | 打字机效果，不干等 |
+| v4 | LangGraph StateGraph | 流程可视化，加功能加节点即可 |
+
+---
 
 ## 技术栈
-- Python · OpenAI SDK · DeepSeek API
-- Sentence-Transformers · NumPy
-- logging · atexit
+
+| 层 | 技术 |
+|---|------|
+| LLM | DeepSeek API |
+| Agent 框架 | LangGraph (StateGraph) |
+| API | FastAPI + Uvicorn |
+| 向量检索 | Sentence-Transformers + NumPy（自实现） |
+| MCP | FastMCP |
+| 部署 | Docker + Docker Compose |
+
+---
+
+## 已知问题
+
+- Python 3.13 与 sentence-transformers 存在兼容问题，本地需 Python 3.11
+- Docker 环境统一用 Python 3.11，RAG 功能正常
+
+---
+
+## 许可证
+
+MIT

@@ -1,0 +1,11 @@
+services:
+    dev-agent:
+      build: .
+      ports:
+        - "8000:8000"
+      env_file:
+        - .env
+      volumes:
+        - C:/Users/24162/Desktop:/app/host-desktop
+        - ./src:/app/src
+      restart: unless-stopped
