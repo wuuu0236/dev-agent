@@ -18,7 +18,8 @@ dev-agent/
 │   │   └── dev_agent_langgraph.py    # v4: LangGraph StateGraph
 │   ├── tools/
 │   │   ├── file_tools.py             # 文件工具（list / read / search）
-│   │   └── rag_tool.py               # 向量知识库 + RAG 检索
+│   │   ├── rag_tool.py               # 向量知识库 + RAG 检索（纯稠密向量）
+│   │   └── hybrid_retriever.py       # 混合检索：BM25 + 稠密向量 + RRF 融合
 │   ├── api/
 │   │   └── server.py                 # FastAPI 服务（集成 LangGraph）
 │   └── mcp_server.py                 # MCP 协议工具服务器
@@ -76,9 +77,23 @@ curl -X POST http://localhost:8000/chat \
 | LLM | DeepSeek API |
 | Agent 框架 | LangGraph (StateGraph) |
 | API | FastAPI + Uvicorn |
-| 向量检索 | Sentence-Transformers + NumPy（自实现） |
+| 检索 | BM25 + 稠密向量 + RRF 混合检索（自实现） |
+| 评估 | RAGAS 四指标 + 4 组超参对照实验 |
 | MCP | FastMCP |
 | 部署 | Docker + Docker Compose |
+
+---
+
+## RAG 管线
+
+```
+用户提问 → BM25 关键词召回 → RRF 融合 → [可选] Cross-Encoder 精排 → LLM 生成
+          → 稠密向量语义召回 ↗
+```
+
+- **双路召回**：BM25 精确匹配 + 稠密向量语义匹配，互补短板
+- **RRF 融合**：倒数排名融合，解决关键词分数和语义分数量纲不同的问题
+- **RAGAS 评估**：自建 20 条测试集，4 组超参对照实验，Precision 从 64% 提升至 87%
 
 ---
 
