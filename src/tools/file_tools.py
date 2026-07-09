@@ -1,13 +1,18 @@
 """
 文件工具 —— 让 Agent 能读取本地文件
-这是 Agent 的"眼睛"
+这是 Agent 的"眼睛"。所有路径操作都经过安全检查。
 """
 
 import os
+from .safety import check_path_safety
 
 
 def list_files(directory: str = ".") -> str:
-    """列出目录下的所有文件"""
+    """列出目录下的所有文件（含安全检查）"""
+    safe, reason = check_path_safety(directory)
+    if not safe:
+        return f"安全拦截: {reason}"
+
     if not os.path.exists(directory):
         return f"目录 '{directory}' 不存在"
 
@@ -24,7 +29,11 @@ def list_files(directory: str = ".") -> str:
 
 
 def read_file(filepath: str) -> str:
-    """读取文件内容"""
+    """读取文件内容（含安全检查）"""
+    safe, reason = check_path_safety(filepath)
+    if not safe:
+        return f"安全拦截: {reason}"
+
     if not os.path.exists(filepath):
         return f"文件 '{filepath}' 不存在"
 
@@ -50,7 +59,11 @@ def read_file(filepath: str) -> str:
 
 
 def search_in_files(directory: str, keyword: str) -> str:
-    """在目录中搜索包含关键词的文件"""
+    """在目录中搜索包含关键词的文件（含安全检查）"""
+    safe, reason = check_path_safety(directory)
+    if not safe:
+        return f"安全拦截: {reason}"
+
     if not os.path.exists(directory):
         return f"目录 '{directory}' 不存在"
 
