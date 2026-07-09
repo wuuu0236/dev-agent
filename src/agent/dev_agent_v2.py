@@ -18,7 +18,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.tools.file_tools import list_files, read_file, search_in_files
-from src.tools.rag_tool import search_knowledge, load_file_to_knowledge, add_knowledge, get_vector_store
+from src.tools.rag_tool import get_vector_store
+from src.tools.hybrid_retriever import search_knowledge, load_file_to_knowledge, add_knowledge
 
 load_dotenv()
 

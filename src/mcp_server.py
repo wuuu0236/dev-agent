@@ -18,7 +18,7 @@ logger = logging.getLogger("mcp_server")
 
 # 尝试导入 RAG 工具（你的知识库）
 try:
-    from src.tools.rag_tool import search_knowledge, add_knowledge, load_file_to_knowledge
+    from src.tools.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
     _HAS_RAG = True
     logger.info("RAG 工具加载成功")
 except Exception as e:

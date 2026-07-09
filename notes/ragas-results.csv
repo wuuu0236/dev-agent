@@ -1,0 +1,5 @@
+﻿实验组,chunk_size,overlap,context_recall,context_precision,faithfulness,answer_relevancy
+A-基线,500,0,1.0,0.6364,1.0,0.9407
+B-大块+重叠,500,50,1.0,0.6095,1.0,0.965
+C-中块+中重叠,300,30,1.0,0.7755,0.9999,0.9481
+D-小块+大重叠,200,50,0.9944,0.8741,1.0,0.9423

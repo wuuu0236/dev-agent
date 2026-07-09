@@ -7,4 +7,9 @@ uvicorn>=0.20.0
 mcp>=1.0.0
 langgraph>=0.2.0
 langchain-core>=0.3.0
+# RAGAS 评估
+ragas>=0.2.0
+pandas>=2.0.0
+datasets>=2.14.0
+langchain-openai>=0.2.0
 
