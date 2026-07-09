@@ -24,10 +24,7 @@ from langgraph.graph.message import add_messages
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.tools.file_tools import list_files, read_file, search_in_files
-
-# RAG 工具：可选（需要 sentence-transformers 且第一次要下载模型）
-# 暂时注释掉，不然网络不好会卡死
-# from src.tools.rag_tool import search_knowledge, load_file_to_knowledge, add_knowledge
+from src.tools.hybrid_retriever import search_knowledge, load_file_to_knowledge, add_knowledge
 
 load_dotenv()
 
@@ -97,12 +94,61 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge",
+            "description": "搜索知识库。当用户问 AI/编程/技术相关问题时使用，支持中英文混合查询。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索查询，用自然语言描述想找什么"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_knowledge",
+            "description": "把文本添加到知识库。当用户直接告诉你一些信息需要记住时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "texts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要添加的文本列表",
+                    },
+                },
+                "required": ["texts"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_file_to_knowledge",
+            "description": "把文件加载到知识库。当用户让你记住或学习某个文件时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "要加载的文件路径"},
+                },
+                "required": ["filepath"],
+            },
+        },
+    },
 ]
 
 TOOL_MAP = {
     "list_files": list_files,
     "read_file": read_file,
     "search_in_files": search_in_files,
+    "search_knowledge": search_knowledge,
+    "add_knowledge": add_knowledge,
+    "load_file_to_knowledge": load_file_to_knowledge,
 }
 
 
