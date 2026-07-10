@@ -1,0 +1,9 @@
+[server]
+# 禁用对 site-packages 的文件监控，避免每次跳转页面扫描整个 transformers 库
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#2563eb"

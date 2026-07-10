@@ -9,7 +9,8 @@ venv/
 *.egg-info/
 dist/
 
-# 向量库（二进制大文件，每次运行会重新生成）
+# 运行时数据
+data/
 *.pkl
 chroma_db/
 

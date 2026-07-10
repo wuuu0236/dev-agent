@@ -18,11 +18,13 @@ dev-agent/
 │   │   └── dev_agent_langgraph.py    # v4: LangGraph StateGraph
 │   ├── tools/
 │   │   ├── file_tools.py             # 文件工具（list / read / search）
+│   │   ├── safety.py                 # 工具安全审查（黑/敏感/白名单）
 │   │   ├── rag_tool.py               # 向量知识库 + RAG 检索（纯稠密向量）
 │   │   └── hybrid_retriever.py       # 混合检索：BM25 + 稠密向量 + RRF 融合
 │   ├── api/
 │   │   └── server.py                 # FastAPI 服务（集成 LangGraph）
-│   └── mcp_server.py                 # MCP 协议工具服务器
+│   ├── mcp_server.py                 # MCP 协议工具服务器
+│   └── evaluate_rag.py               # RAGAS 评估脚本（4 组对照实验）
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
@@ -70,6 +72,19 @@ curl -X POST http://localhost:8000/chat \
 
 ---
 
+## Agent 工具
+
+| 工具 | 类型 | 说明 |
+|------|------|------|
+| `list_files` | 文件 | 列出目录下的文件和文件夹 |
+| `read_file` | 文件 | 读取文件内容（含安全检查） |
+| `search_in_files` | 文件 | 按关键词搜索文件 |
+| `search_knowledge` | RAG | 混合检索知识库（BM25 + 稠密 + RRF） |
+| `add_knowledge` | RAG | 添加文本到知识库 |
+| `load_file_to_knowledge` | RAG | 加载文件到知识库 |
+
+---
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -78,6 +93,7 @@ curl -X POST http://localhost:8000/chat \
 | Agent 框架 | LangGraph (StateGraph) |
 | API | FastAPI + Uvicorn |
 | 检索 | BM25 + 稠密向量 + RRF 混合检索（自实现） |
+| 安全 | 三层审查：黑名单 + 敏感文件 + 路径白名单 |
 | 评估 | RAGAS 四指标 + 4 组超参对照实验 |
 | MCP | FastMCP |
 | 部署 | Docker + Docker Compose |

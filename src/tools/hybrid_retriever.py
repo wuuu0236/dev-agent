@@ -71,12 +71,15 @@ class SimpleBM25:
     @staticmethod
     def tokenize(text: str) -> list[str]:
         """
-        简单分词：按非字母数字字符切分
-        中文场景实际应该用 jieba，这里保持零依赖
+        jieba 中文分词 + 英文保留
+        切换为 jieba 后，BM25 的词语级匹配精度大幅提升。
         """
-        # 中文：按标点和空格切，保留中文字符和英文字母数字
-        tokens = re.findall(r'[一-鿿]+|[a-zA-Z0-9]+', text.lower())
-        return [t for t in tokens if len(t) > 1]
+        try:
+            import jieba
+            return [t for t in jieba.cut(text) if len(t.strip()) > 0]
+        except ImportError:
+            # 降级：按字切分
+            return list(text)
 
     def index(self, documents: list[str]):
         """建索引：分词 → 统计 → 算 IDF"""
