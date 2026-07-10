@@ -1,8 +1,10 @@
-# Dev Agent —— 开发助手 AI Agent
+# Dev Agent —— 开发助手 AI Agent + 知识库问答平台
 
-基于 **LangGraph + FastAPI** 的 AI Agent，能操作本地文件、搜索知识库。支持 HTTP 调用和 Docker 一键部署。
+基于 **LangGraph + FastAPI + Streamlit** 的完整 RAG 系统。支持 HTTP API 调用、Web 前端交互、Docker 一键部署，已上线可演示。
 
-> 从 `while` 循环到 `StateGraph`，完整记录了 Agent 架构的演进过程。
+> 从 `while` 循环到 `StateGraph`，从本地玩具到线上产品，完整记录了 AI Agent 从开发到生产的过程。
+
+📎 **在线演示**：[https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/](https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/)
 
 ---
 
@@ -10,6 +12,12 @@
 
 ```
 dev-agent/
+├── app.py                        # Streamlit Web 入口
+├── pages/
+│   ├── 1_📚_知识库管理.py         # 创建 / 删除知识库
+│   ├── 2_📄_文档上传.py           # 上传解析文档（PDF/Word/TXT）
+│   ├── 3_💬_智能问答.py           # RAG 问答（带引用来源）
+│   └── 4_📊_评估面板.py           # LLM Judge 量化评估
 ├── src/
 │   ├── agent/
 │   │   ├── dev_agent.py              # v1: 基础 Agent 循环（ReAct 模式）
@@ -18,15 +26,24 @@ dev-agent/
 │   │   └── dev_agent_langgraph.py    # v4: LangGraph StateGraph
 │   ├── tools/
 │   │   ├── file_tools.py             # 文件工具（list / read / search）
-│   │   ├── safety.py                 # 工具安全审查（黑/敏感/白名单）
-│   │   ├── rag_tool.py               # 向量知识库 + RAG 检索（纯稠密向量）
-│   │   └── hybrid_retriever.py       # 混合检索：BM25 + 稠密向量 + RRF 融合
+│   │   ├── safety.py                 # 三层安全审查（黑/敏感/白名单）
+│   │   ├── rag_tool.py               # 向量知识库 + RAG 检索
+│   │   └── hybrid_retriever.py       # 混合检索：BM25（jieba 分词）+ 向量 + RRF
 │   ├── api/
 │   │   └── server.py                 # FastAPI 服务（集成 LangGraph）
 │   ├── mcp_server.py                 # MCP 协议工具服务器
-│   └── evaluate_rag.py               # RAGAS 评估脚本（4 组对照实验）
-├── Dockerfile
-├── docker-compose.yml
+│   ├── config.py                     # 全局配置
+│   ├── database.py                   # SQLite 数据库（知识库 + 文档管理）
+│   ├── parser.py                     # 文档解析（PDF/Word/TXT/MD）
+│   ├── chunker.py                    # 智能分块（500字 + 50字重叠）
+│   ├── embeddings.py                 # 本地 Embedding 模型
+│   ├── vector_store.py               # Chroma 向量存储
+│   ├── hybrid_retriever.py           # Web 版混合检索
+│   ├── rag_agent.py                  # RAG 问答 Agent
+│   ├── evaluation.py                 # LLM Judge 评估（1-5 分制）
+│   └── evaluate_rag.py               # RAGAS 评估脚本
+├── knowledge/                        # 知识库文档
+├── Dockerfile + docker-compose.yml   # Docker 部署
 └── requirements.txt
 ```
 
@@ -34,19 +51,27 @@ dev-agent/
 
 ## 快速开始
 
-### 方式一：本地运行
+### 方式一：Web 前端（推荐演示用）
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+# 浏览器打开 http://localhost:8501
+```
+
+### 方式二：HTTP API
 
 ```bash
 pip install -r requirements.txt
 python src/api/server.py
-# 浏览器打开 http://localhost:8000/docs
+# 浏览器打开 http://localhost:8000/docs 查看 Swagger 文档
 ```
 
-### 方式二：Docker 一键部署
+### 方式三：Docker 部署
 
 ```bash
 docker compose up
-# 浏览器打开 http://localhost:8000/docs
+# API: http://localhost:8000/docs
 ```
 
 ---
@@ -69,19 +94,20 @@ curl -X POST http://localhost:8000/chat \
 | v2 | logging + 异常保护 | 工具崩溃不连累 Agent |
 | v3 | 流式输出 | 打字机效果，不干等 |
 | v4 | LangGraph StateGraph | 流程可视化，加功能加节点即可 |
+| **Web** | **Streamlit + SQLite + 评估面板** | **从本地 Demo 到线上产品** |
 
 ---
 
 ## Agent 工具
 
-| 工具 | 类型 | 说明 |
-|------|------|------|
-| `list_files` | 文件 | 列出目录下的文件和文件夹 |
-| `read_file` | 文件 | 读取文件内容（含安全检查） |
-| `search_in_files` | 文件 | 按关键词搜索文件 |
-| `search_knowledge` | RAG | 混合检索知识库（BM25 + 稠密 + RRF） |
-| `add_knowledge` | RAG | 添加文本到知识库 |
-| `load_file_to_knowledge` | RAG | 加载文件到知识库 |
+| 工具 | 说明 |
+|------|------|
+| `list_files` | 列出目录内容 |
+| `read_file` | 读取文件（含三层安全审查） |
+| `search_in_files` | 按关键词搜索文件 |
+| `search_knowledge` | 混合检索知识库（BM25 + 向量 + RRF） |
+| `add_knowledge` | 添加文本到知识库 |
+| `load_file_to_knowledge` | 加载文件到知识库 |
 
 ---
 
@@ -90,33 +116,48 @@ curl -X POST http://localhost:8000/chat \
 | 层 | 技术 |
 |---|------|
 | LLM | DeepSeek API |
-| Agent 框架 | LangGraph (StateGraph) |
+| Agent 框架 | LangGraph（StateGraph） |
+| Web 前端 | Streamlit |
 | API | FastAPI + Uvicorn |
-| 检索 | BM25 + 稠密向量 + RRF 混合检索（自实现） |
-| 安全 | 三层审查：黑名单 + 敏感文件 + 路径白名单 |
-| 评估 | RAGAS 四指标 + 4 组超参对照实验 |
+| 数据库 | SQLite |
+| 向量库 | Chroma |
+| 检索 | BM25（jieba 分词）+ 向量 + RRF 混合检索 |
+| Embedding | text2vec-base-chinese（本地，免费） |
+| 安全 | 三层审查：黑名单 + 敏感文件 + 白名单 |
+| 评估 | LLM Judge（4 维度 1-5 分制）+ RAGAS |
 | MCP | FastMCP |
-| 部署 | Docker + Docker Compose |
+| 部署 | Docker + Streamlit Cloud |
 
 ---
 
 ## RAG 管线
 
 ```
-用户提问 → BM25 关键词召回 → RRF 融合 → [可选] Cross-Encoder 精排 → LLM 生成
-          → 稠密向量语义召回 ↗
+用户提问 → BM25（jieba 分词）→ RRF 融合 → LLM 生成答案 + 引用来源
+          → 稠密向量语义检索 ↗
 ```
 
-- **双路召回**：BM25 精确匹配 + 稠密向量语义匹配，互补短板
-- **RRF 融合**：倒数排名融合，解决关键词分数和语义分数量纲不同的问题
-- **RAGAS 评估**：自建 20 条测试集，4 组超参对照实验，Precision 从 64% 提升至 87%
+---
+
+## 评估体系
+
+采用 LLM-as-Judge 模式对 RAG 质量做量化评估。将「问题 + 检索结果 + 生成答案 + 参考答案」交给 DeepSeek，逐项打分（1-5 分制）：
+
+| 指标 | 衡量什么 |
+|------|------|
+| Context Recall | 检索结果是否覆盖了答案所需信息 |
+| Context Precision | 相关文档是否排在检索结果前面 |
+| Faithfulness | 答案是否忠实于文档（有无幻觉） |
+| Answer Relevancy | 答案是否直接回应了问题 |
+
+测试集覆盖 6 种题型（定义型、对比型、推理型、应用型、刁钻型、细节型），支持自定义测试集和 A/B 对比实验。
 
 ---
 
 ## 已知问题
 
 - Python 3.13 与 sentence-transformers 存在兼容问题，本地需 Python 3.11
-- Docker 环境统一用 Python 3.11，RAG 功能正常
+- Docker 环境统一用 Python 3.11
 
 ---
 
