@@ -19,6 +19,7 @@
 - **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph，四个版本代码同仓保留。
 - **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分导致的召回过窄。
 - **RAG 评估体系**：LLM-as-Judge 四维度（Recall / Precision / Faithfulness / Relevancy）打分并接入 RAGAS；优化后 Context Precision 从 **0.64 → 0.87（+36%）**，测试集 50 题覆盖 6 类题型。
+- **多知识库隔离 + 评估面板**：SQLite 管理元数据、Chroma 管理向量，支持多知识库并行管理；Streamlit 评估面板对上传的真实文档直接跑 RAGAS 指标。
 - **MCP 工具暴露**：FastMCP 将 RAG 工具以 MCP 协议暴露，与 Claude Code 打通；文件工具带三层安全审查（黑名单 → 敏感文件检测 → 白名单）。
 - **一键部署**：Dockerfile + docker-compose 本地部署，Streamlit Cloud 线上托管，面试官打开链接就能演示。
 
