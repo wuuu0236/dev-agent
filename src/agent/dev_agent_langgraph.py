@@ -28,6 +28,13 @@ from src.tools.hybrid_retriever import search_knowledge, load_file_to_knowledge,
 
 load_dotenv()
 
+# --- Langfuse 观测层 ---
+# 每一次 graph.stream() 挂上 CallbackHandler，
+# Langfuse 面板会自动记录 call_model / call_tools 两个节点的完整 span。
+from langfuse.langchain import CallbackHandler
+
+langfuse_handler = CallbackHandler()  # 自动从 LANGFUSE_PUBLIC_KEY / SECRET_KEY / HOST 环境变量读取
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("langgraph_agent")
 
@@ -339,7 +346,15 @@ def run_agent(question: str, work_dir: str = "C:/Users/24162/Desktop"):
     logger.info(f"收到问题: {question[:50]}...")
 
     # graph.stream() 每次 yield 一个节点执行的结果
-    for event in graph.stream(initial_state):
+    final_answer = ""
+    for event in graph.stream(
+        initial_state,
+        config={
+            "callbacks": [langfuse_handler],
+            "metadata": {"session_id": "cli-run", "user_question": question[:80]},
+            "run_name": "dev-agent-langgraph",
+        },
+    ):
         node_name = list(event.keys())[0]
         node_data = event[node_name]
         if "messages" in node_data:
@@ -347,10 +362,15 @@ def run_agent(question: str, work_dir: str = "C:/Users/24162/Desktop"):
             last_msg = msgs[-1]
             preview = str(getattr(last_msg, 'content', ''))[:80].replace('\n', ' ')
             logger.debug(f"[{node_name}] {preview}")
+        # 捕获最终答案：call_model 节点且没有 tool_calls 时
+        if node_name == "call_model":
+            msgs = node_data.get("messages", [])
+            if msgs:
+                last = msgs[-1]
+                if not getattr(last, 'tool_calls', None):
+                    final_answer = getattr(last, 'content', str(last))
 
-    # 获取最终状态中的最后一条消息（AI 回答）
-    final_state = event[list(event.keys())[0]] if event else {}
-    return "抱歉，Agent 没有生成回答。"
+    return final_answer or "抱歉，Agent 没有生成回答。"
 
 
 # ================================================================
@@ -385,7 +405,14 @@ if __name__ == "__main__":
         }
 
         final_answer = ""
-        for event in graph.stream(initial_state):
+        for event in graph.stream(
+            initial_state,
+            config={
+                "callbacks": [langfuse_handler],
+                "metadata": {"session_id": "cli-interactive", "user_question": q[:80]},
+                "run_name": "dev-agent-langgraph",
+            },
+        ):
             node_name = list(event.keys())[0]
             if node_name == "call_model":
                 msgs = event["call_model"].get("messages", [])

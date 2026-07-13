@@ -33,3 +33,6 @@ ragas>=0.2.0
 pandas>=2.0.0
 datasets>=2.14.0
 
+# --- 可观测性 ---
+langfuse>=2.50.0
+

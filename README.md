@@ -151,6 +151,23 @@ curl -X POST http://localhost:8000/chat \
 
 ---
 
+## 🔭 Agent 可观测性（Langfuse）
+
+Agent 每次调用的完整链路自动上报到 Langfuse Cloud，
+按 session_id / prompt 版本聚合，量化定位是 LLM 慢还是检索慢。
+
+![Langfuse Trace 概览](docs/langfuse/01-trace-list.png)
+![Agent Trace 详情](docs/langfuse/02-trace-detail-agent.png)
+![RAG Trace 详情](docs/langfuse/03-trace-detail-rag.png)
+
+核心埋点：
+
+- LangGraph `graph.stream()` 挂 `CallbackHandler`，一次调用自动产生 `call_model / call_tools` 两类 span。
+- RAG 主流程用 `@observe` 装饰 `rag_query / generate_answer`，自动捕获函数输入输出和延迟。
+- LLM 客户端切换 `langfuse.openai`，Token 消耗与延迟直接进面板。
+
+---
+
 ## 📂 项目结构
 
 ```
