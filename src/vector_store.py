@@ -13,7 +13,7 @@ import shutil
 import chromadb
 from chromadb.config import Settings
 from src.config import CHROMA_DIR, EMBEDDING_DIM
-from src.embeddings import get_embedding_model
+from src.embeddings import embed_texts, embed_single
 
 
 def _get_client() -> chromadb.PersistentClient:
@@ -54,10 +54,9 @@ def add_chunks(kb_id: str, chunks: list[dict]):
     client = _get_client()
     collection = client.get_collection(_collection_name(kb_id))
 
-    # Chroma 的 add 方法使用自定义 embedding
-    model = get_embedding_model()
+    # 使用 Embedding API 向量化
     documents = [c["content"] for c in chunks]
-    embeddings = model.encode(documents, normalize_embeddings=True).tolist()
+    embeddings = embed_texts(documents)
 
     ids = [f"{c['source']}_chunk{c['chunk_index']}" for c in chunks]
     metadatas = [
@@ -83,8 +82,7 @@ def search_similar(kb_id: str, query: str, top_k: int = 5) -> list[dict]:
     client = _get_client()
     collection = client.get_collection(_collection_name(kb_id))
 
-    model = get_embedding_model()
-    query_embedding = model.encode([query], normalize_embeddings=True).tolist()
+    query_embedding = [embed_single(query)]
 
     results = collection.query(
         query_embeddings=query_embedding,

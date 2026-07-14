@@ -24,11 +24,13 @@ LLM_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_TEMPERATURE = 0.3  # RAG 场景用低温度，减少幻觉
 
-# --- Embedding 模型 ---
-# 本地运行，免费，不需要 API
-# text2vec-base-chinese: 中文优化，768维，已缓存在本地
-EMBEDDING_MODEL = "shibing624/text2vec-base-chinese"
-EMBEDDING_DIM = 768  # 该模型的输出维度
+# --- Embedding API ---
+# 使用硅基流动 Embedding API，不需要下载本地模型
+# Streamlit Cloud 上不会卡进度条
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", LLM_API_KEY)
+EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", "https://api.siliconflow.cn/v1")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
+EMBEDDING_DIM = 1024  # BGE-large-zh 输出 1024 维
 
 # --- Chunk 配置 ---
 CHUNK_SIZE = 500       # 每个 chunk 的字符数

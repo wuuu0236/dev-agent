@@ -32,36 +32,60 @@ load_dotenv()
 KNOWLEDGE_DIR = Path(__file__).parent.parent / "knowledge"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-EMBEDDING_MODEL_NAME = "shibing624/text2vec-base-chinese"
 
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
-
-def _find_local_model_path(model_name: str) -> str:
-    """找到本地缓存的模型路径，避免网络请求"""
-    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-    model_dir_name = "models--" + model_name.replace("/", "--")
-
-    # 查找 snapshots 目录下的模型文件
-    snapshots_dir = os.path.join(cache_dir, model_dir_name, "snapshots")
-    if os.path.isdir(snapshots_dir):
-        for snapshot in os.listdir(snapshots_dir):
-            snapshot_path = os.path.join(snapshots_dir, snapshot)
-            safetensors = os.path.join(snapshot_path, "model.safetensors")
-            if os.path.isfile(safetensors):
-                return snapshot_path
-
-    # 回退：让 sentence-transformers 自己处理
-    return model_name
+# Embedding API 客户端（硅基流动，OpenAI 兼容）
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", DEEPSEEK_API_KEY)
+EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", "https://api.siliconflow.cn/v1")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
+_embed_client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_API_BASE)
 
 
-def _load_embedding_model():
-    """加载 Embedding 模型（优先本地缓存）"""
-    from sentence_transformers import SentenceTransformer
+def _embed_api(texts: list[str]) -> np.ndarray:
+    """通过 Embedding API 批量向量化"""
+    if not texts:
+        return np.array([])
+    response = _embed_client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    return np.array([d.embedding for d in response.data])
 
-    local_path = _find_local_model_path(EMBEDDING_MODEL_NAME)
-    print(f"  📥 加载 Embedding 模型: {local_path} ...")
-    return SentenceTransformer(local_path, local_files_only=True)
+
+# ============================================================
+# 向量检索（支持自定义 chunk 参数）
+# ============================================================
+class ChunkedVectorStore:
+    """可配置 chunk_size 和 overlap 的向量库"""
+
+    def __init__(self):
+        self.chunks: list[str] = []
+        self.embeddings: np.ndarray | None = None
+
+    def build_from_docs(self, docs: list[str], chunk_size: int, overlap: int):
+        """从文档构建向量库"""
+        self.chunks = []
+        for doc in docs:
+            self.chunks.extend(chunk_text(doc, chunk_size, overlap))
+        print(f"  📄 {len(docs)} 篇文档 → {len(self.chunks)} 个 chunks (size={chunk_size}, overlap={overlap})")
+        self.embeddings = _embed_api(self.chunks)
+        print(f"  ✅ 向量库就绪，维度: {self.embeddings.shape}")
+
+    def search(self, query: str, top_k: int = 3) -> list[str]:
+        """余弦相似度检索"""
+        if self.embeddings is None or len(self.chunks) == 0:
+            return ["向量库为空"]
+
+        query_vec = _embed_api([query])[0]
+        similarities = np.dot(self.embeddings, query_vec) / (
+            np.linalg.norm(self.embeddings, axis=1) * np.linalg.norm(query_vec)
+        )
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+
+        results = []
+        for idx in top_indices:
+            if similarities[idx] >= 0.3:
+                results.append(self.chunks[idx])
+        return results if results else ["没有找到相关内容"]
+
 
 # ============================================================
 # 文本分块器
@@ -93,7 +117,6 @@ def load_knowledge_docs(knowledge_dir: Path) -> list[str]:
 # 测试数据集（20 条）
 # ============================================================
 TEST_DATA = [
-    # ── 事实查询（5 条） ──
     {
         "question": "AI Agent 的核心三要素是什么？",
         "ground_truth": "AI Agent 的核心三要素是 LLM（大语言模型）、工具（Tools）和循环（Loop）。LLM 作为大脑负责理解和决策，工具让 Agent 能执行实际操作，循环让 Agent 能持续'思考→行动→观察'直到问题解决。三者缺一不可。"
@@ -179,44 +202,6 @@ TEST_DATA = [
         "ground_truth": "dev-agent 涉及六个技术层：LLM 层（DeepSeek API 推理）、Agent 框架层（LangGraph StateGraph 编排）、API 层（FastAPI HTTP 接口）、检索层（Sentence-Transformers + NumPy RAG）、协议层（FastMCP MCP 服务）、部署层（Docker + Docker Compose）。"
     },
 ]
-
-
-# ============================================================
-# 向量检索（支持自定义 chunk 参数）
-# ============================================================
-class ChunkedVectorStore:
-    """可配置 chunk_size 和 overlap 的向量库"""
-
-    def __init__(self):
-        self.model = _load_embedding_model()
-        self.chunks: list[str] = []
-        self.embeddings: np.ndarray | None = None
-
-    def build_from_docs(self, docs: list[str], chunk_size: int, overlap: int):
-        """从文档构建向量库"""
-        self.chunks = []
-        for doc in docs:
-            self.chunks.extend(chunk_text(doc, chunk_size, overlap))
-        print(f"  📄 {len(docs)} 篇文档 → {len(self.chunks)} 个 chunks (size={chunk_size}, overlap={overlap})")
-        self.embeddings = self.model.encode(self.chunks)
-        print(f"  ✅ 向量库就绪，维度: {self.embeddings.shape}")
-
-    def search(self, query: str, top_k: int = 3) -> list[str]:
-        """余弦相似度检索"""
-        if self.embeddings is None or len(self.chunks) == 0:
-            return ["向量库为空"]
-
-        query_vec = self.model.encode([query])[0]
-        similarities = np.dot(self.embeddings, query_vec) / (
-            np.linalg.norm(self.embeddings, axis=1) * np.linalg.norm(query_vec)
-        )
-        top_indices = np.argsort(similarities)[::-1][:top_k]
-
-        results = []
-        for idx in top_indices:
-            if similarities[idx] >= 0.3:
-                results.append(self.chunks[idx])
-        return results if results else ["没有找到相关内容"]
 
 
 # ============================================================

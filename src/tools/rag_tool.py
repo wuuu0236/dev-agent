@@ -4,9 +4,13 @@ RAG 工具 —— 让 Agent 能搜索知识库
 """
 
 import os
+import sys
 import pickle
-from sentence_transformers import SentenceTransformer
 import numpy as np
+
+# 在 tools 目录中运行时也能找到 src
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from src.embeddings import embed_texts, embed_single
 
 
 class SimpleVectorStore:
@@ -14,14 +18,15 @@ class SimpleVectorStore:
     最简向量数据库 —— 理解 Chroma/Milvus 在做什么
     只用了 NumPy，没有额外依赖
 
+    向量化走 Embedding API，不下载本地模型。
+
     面试时能说清楚：
       "Chroma 本质上就是存向量 + 做余弦相似度搜索，
        我自己实现过一个简化版来理解它的原理。"
     """
 
-    def __init__(self, model_name: str = "shibing624/text2vec-base-chinese"):
-        print(f"📥 加载向量模型: {model_name} ...")
-        self.model = SentenceTransformer(model_name)
+    def __init__(self):
+        print("📥 使用 Embedding API 做向量化...")
         self.documents: list[str] = []
         self.embeddings: np.ndarray | None = None
 
@@ -29,7 +34,7 @@ class SimpleVectorStore:
         """添加文档（对照 MaxKB 的上传文档 → 向量化 → 入库）"""
         print(f"🔧 正在向量化 {len(documents)} 篇文档...")
         self.documents = documents
-        self.embeddings = self.model.encode(documents)
+        self.embeddings = np.array(embed_texts(documents))
         print(f"✅ 向量库就绪，共 {len(documents)} 条")
 
     def search(self, query: str, top_k: int = 3) -> list[str]:
@@ -40,7 +45,7 @@ class SimpleVectorStore:
         if self.embeddings is None:
             return ["向量库为空，请先添加文档"]
 
-        query_vec = self.model.encode([query])[0]
+        query_vec = embed_single(query)
 
         # 余弦相似度（NumPy 一行搞定）
         similarities = np.dot(self.embeddings, query_vec) / (

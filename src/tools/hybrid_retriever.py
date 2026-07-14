@@ -28,7 +28,7 @@ import re
 import math
 import numpy as np
 from collections import defaultdict
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import CrossEncoder
 
 
 # ================================================================
@@ -239,7 +239,6 @@ class HybridRetriever:
 
     def __init__(
         self,
-        embedding_model: str = "shibing624/text2vec-base-chinese",
         reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         enable_rerank: bool = True,
     ):
@@ -248,9 +247,11 @@ class HybridRetriever:
         # BM25 关键词检索引擎
         self.bm25 = SimpleBM25()
 
-        # 稠密向量检索引擎
-        print(f"📥 加载 Embedding 模型: {embedding_model} ...")
-        self.embedder = SentenceTransformer(embedding_model)
+        # 稠密向量：走 Embedding API，不下载本地模型
+        print("📥 使用 Embedding API 做向量化...")
+        from src.embeddings import embed_texts, embed_single
+        self._embed_texts = embed_texts
+        self._embed_single = embed_single
         self._documents: list[str] = []
         self._embeddings: np.ndarray | None = None
 
@@ -274,8 +275,8 @@ class HybridRetriever:
         self.bm25.index(documents)
         print(f"   ✅ BM25 索引完成（{len(self.bm25._idf)} 个词）")
 
-        # 2. 稠密向量索引
-        self._embeddings = self.embedder.encode(documents)
+        # 2. 稠密向量索引（走 API）
+        self._embeddings = np.array(self._embed_texts(documents))
         print(f"   ✅ 向量索引完成（维度: {self._embeddings.shape[1]}）")
 
     def _dense_search(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
@@ -283,7 +284,7 @@ class HybridRetriever:
         if self._embeddings is None:
             return []
 
-        query_vec = self.embedder.encode([query])[0]
+        query_vec = self._embed_single(query)
 
         # 余弦相似度
         similarities = np.dot(self._embeddings, query_vec) / (
