@@ -110,8 +110,8 @@ if uploaded_files:
                     fail_count += 1
                     continue
 
-                # 3. 写入向量库（这步最慢，需要加载 embedding 模型）
-                status_text.text(f"🧮 向量化: {uf.name} ({len(chunks)} chunks) — 首次需加载模型，请耐心等待...")
+                # 3. 写入向量库
+                status_text.text(f"🧮 向量化: {uf.name} ({len(chunks)} chunks)")
                 add_chunks(kb_id, chunks)
 
                 # 4. 更新状态
