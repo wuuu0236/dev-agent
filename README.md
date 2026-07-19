@@ -1,4 +1,4 @@
-# 🧠 Dev-Agent — 从 while 循环到 LangGraph 的开发助手 Agent
+﻿# 🧠 Dev-Agent — 从 while 循环到 LangGraph 的开发助手 Agent
 
 [![Live Demo](https://img.shields.io/badge/Demo-Try%20it%20now-brightgreen)](https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/)
 [![Python](https://img.shields.io/badge/Python-3.11-blue)]()
@@ -16,10 +16,10 @@
 
 ## ✨ 核心亮点
 
-- **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph，四个版本代码同仓保留。
-- **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分导致的召回过窄。
-- **RAG 评估体系**：LLM-as-Judge 四维度（Recall / Precision / Faithfulness / Relevancy）打分并接入 RAGAS；优化后 Context Precision 从 **0.64 → 0.87（+36%）**，测试集 50 题覆盖 6 类题型。
-- **多知识库隔离 + 评估面板**：SQLite 管理元数据、Chroma 管理向量，支持多知识库并行管理；Streamlit 评估面板对上传的真实文档直接跑 RAGAS 指标。
+- **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph，四个版本代码全部保留（v4 为主，v1-v3 见 src/agent/legacy/）。
+- **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前线上配置为纯向量检索（经 A/B 测试，当前文档场景下纯向量优于混合），保留 BM25 代码可一键切换。
+- **RAG 评估体系**：LLM-as-Judge 四维度（Recall / Precision / Faithfulness / Relevancy）打分；优化后 Context Precision 从 **0.64 → 0.87（+36%）**（基于自建测试集）。
+- **多知识库隔离 + 评估面板**：SQLite 管理元数据、Chroma 管理向量，支持多知识库并行管理；Streamlit 评估面板对上传的真实文档直接跑 LLM 评估指标。
 - **MCP 工具暴露**：FastMCP 将 RAG 工具以 MCP 协议暴露，与 Claude Code 打通；文件工具带三层安全审查（黑名单 → 敏感文件检测 → 白名单）。
 - **一键部署**：Dockerfile + docker-compose 本地部署，Streamlit Cloud 线上托管，面试官打开链接就能演示。
 
@@ -112,7 +112,7 @@ curl -X POST http://localhost:8000/chat \
 | 检索 | BM25（jieba 分词）+ 向量 + RRF 融合 |
 | Embedding | text2vec-base-chinese（本地，免费） |
 | 安全 | 三层审查：黑名单 + 敏感文件 + 白名单 |
-| 评估 | LLM Judge（4 维度 1-5 分制）+ RAGAS |
+| 评估 | LLM-as-Judge（4 维度 1-5 分制） |
 | MCP | FastMCP |
 | 部署 | Docker + Streamlit Cloud |
 
@@ -183,7 +183,7 @@ dev-agent/
 │   ├── parser.py / chunker.py    # 文档解析与分块
 │   ├── vector_store.py           # Chroma 向量存储
 │   ├── rag_agent.py              # RAG 问答 Agent
-│   └── evaluate_rag.py           # RAGAS 评估脚本
+│   └── evaluate_rag.py           # 评估脚本（已归档）
 ├── knowledge/                    # 知识库文档
 ├── Dockerfile + docker-compose.yml
 └── requirements.txt

@@ -1,4 +1,4 @@
-"""
+﻿"""
 dev_agent_v3.py —— 流式输出版
 
 和 v2 的区别：
@@ -14,7 +14,7 @@ import atexit
 from openai import OpenAI
 from dotenv import load_dotenv
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 from src.tools.file_tools import list_files, read_file, search_in_files
 from src.tools.rag_tool import get_vector_store

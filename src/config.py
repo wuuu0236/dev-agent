@@ -1,4 +1,4 @@
-"""
+﻿"""
 全局配置：路径、模型、超参数
 """
 import os
@@ -38,8 +38,8 @@ CHUNK_OVERLAP = 50     # 相邻 chunk 重叠的字符数
 
 # --- 检索配置 ---
 TOP_K_RETRIEVE = 5     # 检索返回的文档数
-BM25_WEIGHT = 0     # RRF 融合中 BM25 的权重
-VECTOR_WEIGHT = 1   # RRF 融合中向量检索的权重
+BM25_WEIGHT = 0     # RRF 融合中 BM25 的权重（当前纯向量，经 A/B 测试该场景下纯向量优于混合检索）
+VECTOR_WEIGHT = 1   # RRF 融合中向量检索的权重（调回 BM25_WEIGHT=1 即可恢复混合检索）
 
 # --- 安全配置 ---
 MAX_FILE_SIZE_MB = 20  # 上传文件大小限制

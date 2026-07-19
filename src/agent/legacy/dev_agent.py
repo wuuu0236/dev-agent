@@ -1,4 +1,4 @@
-"""
+﻿"""
 开发助手 Agent —— 能读代码、搜文件、分析项目
 
 这是应用层 Agent 的标准写法：
@@ -16,7 +16,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 # 把项目根目录加到 sys.path，方便导入 tools
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 from src.tools.file_tools import list_files, read_file, search_in_files
 from src.tools.hybrid_retriever import search_knowledge, load_file_to_knowledge, add_knowledge

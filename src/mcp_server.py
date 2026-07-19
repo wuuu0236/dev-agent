@@ -1,4 +1,4 @@
-"""
+﻿"""
 MCP 服务器 —— 把 dev-agent 的工具暴露给任何 MCP 兼容的 AI
 
 启动方式（Claude Code 会自动调，不需要手动跑）：
@@ -17,14 +17,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("mcp_server")
 
 # 尝试导入 RAG 工具（你的知识库）
-try:
-    from src.tools.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
-    _HAS_RAG = True
-    logger.info("RAG 工具加载成功")
-except Exception as e:
-    _HAS_RAG = False
-    logger.warning(f"RAG 工具加载失败（sentence-transformers 版本问题）: {e}")
-
+# 新版统一检索，不再依赖 sentence-transformers
+from src.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
+_HAS_RAG = True
 mcp = FastMCP("dev-agent-tools")
 
 
@@ -60,6 +55,11 @@ def load_file_to_user_knowledge(filepath: str) -> str:
     """把文件加载到知识库。当用户说「学习这个文件」「记住这个文件」时使用。"""
     if not _HAS_RAG:
         return "知识库暂不可用。sentence-transformers 与 Python 3.13 有兼容问题。"
+    # 安全检查：防止路径穿越（如 ../ 绕过白名单）
+    from src.tools.safety import check_path_safety
+    safe, reason = check_path_safety(filepath)
+    if not safe:
+        return f"安全拦截: {reason}"
     return load_file_to_knowledge(filepath)
 
 

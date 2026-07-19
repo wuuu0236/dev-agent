@@ -126,3 +126,75 @@ class HybridRetriever:
         # 按 RRF 分数从高到低排序
         sorted_results = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)
         return sorted_results[:top_k]
+# ================================================================
+# 模块级函数：供 v4 Agent 和 MCP 调用（统一入口）
+# ================================================================
+
+_DEFAULT_KB = "agent"
+
+
+def _ensure_kb() -> str:
+    """获取最近的知识库 ID，没有就创建默认的"""
+    from src.database import list_kbs, create_kb, init_db
+    init_db()
+    kbs = list_kbs()
+    if kbs:
+        return kbs[0]["id"]
+    from src.vector_store import create_collection
+    kb = create_kb(_DEFAULT_KB, "Agent 默认知识库")
+    create_collection(kb["id"])
+    return kb["id"]
+
+
+def search_knowledge(query: str) -> str:
+    """搜索知识库，返回纯文本（供 Agent/MCP 调用）"""
+    kb_id = _ensure_kb()
+    retriever = HybridRetriever(kb_id)
+    results = retriever.search(query, top_k=5)
+    if not results:
+        return "知识库中未找到相关内容，请先上传文档。"
+    lines = []
+    for i, r in enumerate(results, 1):
+        source = f"[{i}] 来源: {r['source']}"
+        if r.get("page"):
+            source += f", 第 {r['page']} 页"
+        lines.append(source)
+        lines.append(r["content"][:300])
+        lines.append("")
+    return "\n".join(lines)
+
+
+def add_knowledge(texts: list[str]) -> str:
+    """把文本添加到知识库"""
+    kb_id = _ensure_kb()
+    from src.chunker import chunk_parsed
+    docs = [{"text": t, "page": None, "source": "agent_"} for t in texts]
+    chunks = chunk_parsed(docs)
+    if not chunks:
+        return "没有可添加的内容"
+    from src.vector_store import add_chunks
+    add_chunks(kb_id, chunks)
+    return f"已添加 {len(chunks)} 条内容到知识库"
+
+
+def load_file_to_knowledge(filepath: str) -> str:
+    """把文件加载到知识库（含安全检查）"""
+    from src.tools.safety import check_path_safety
+    safe, reason = check_path_safety(filepath)
+    if not safe:
+        return f"安全拦截: {reason}"
+    from src.parser import parse_file
+    from src.chunker import chunk_parsed
+    from src.vector_store import add_chunks
+    kb_id = _ensure_kb()
+    try:
+        parsed = parse_file(filepath)
+        if not parsed:
+            return f"文件 '{filepath}' 没有可解析的内容"
+        chunks = chunk_parsed(parsed)
+        if not chunks:
+            return f"文件 '{filepath}' 没有足够的内容"
+        add_chunks(kb_id, chunks)
+        return f"已加载文件 '{filepath}'，共 {len(chunks)} 条内容到知识库"
+    except Exception as e:
+        return f"加载失败: {type(e).__name__}: {e}"

@@ -1,4 +1,4 @@
-"""
+﻿"""
 DataLens — 生产级 RAG 知识库平台
 
 首页：项目介绍 + 导航入口
@@ -27,7 +27,7 @@ st.sidebar.markdown("""
 ### 技术栈
 - 🔍 混合检索（BM25 + 向量）
 - 🧠 LangGraph Agent
-- 📊 RAGAS 评估
+- 📊 LLM-as-Judge 评估
 - 🗄️ SQLite + Chroma
 - 🚀 Streamlit 部署
 """)
@@ -49,14 +49,14 @@ with col1:
     |------|----------------|
     | ❌ 本地玩具 | ✅ **线上部署**，面试官点开就能用 |
     | ❌ 假数据 | ✅ 上传**真实文档**，支持 PDF/Word/TXT |
-    | ❌ 没评估 | ✅ 内置 **RAGAS 评估面板**，量化展示检索质量 |
+    | ❌ 没评估 | ✅ 内置 **LLM 评估面板**，量化展示检索质量 |
 
     ### 核心技术亮点
 
-    - **混合检索**：BM25 关键词 + 向量语义，RRF 融合 + Cross-Encoder 精排
+    - **混合检索**：BM25 关键词 + 向量语义，RRF 融合
     - **多知识库**：每个知识库独立隔离，支持多用户场景
     - **文档解析**：PDF（PyMuPDF）+ Word（python-docx）+ 文本
-    - **量化评估**：RAGAS 四指标（Recall / Precision / Faithfulness / Relevancy）
+    - **量化评估**：LLM-as-Judge 四维评估（Recall / Precision / Faithfulness / Relevancy）
     - **引用溯源**：每个回答标注来源文件和页码
     """)
 
@@ -67,7 +67,7 @@ with col2:
     1. **创建知识库** — 给它起个名字
     2. **上传文档** — PDF、Word、TXT 都支持
     3. **开始问答** — 用中文提问
-    4. **查看评估** — RAGAS 量化数据
+    4. **查看评估** — LLM 量化数据
     """)
 
     st.success("""

@@ -1,4 +1,4 @@
-"""
+﻿"""
 dev_agent_v2.py —— 企业级改进版
 
 和 v1 的区别：
@@ -15,7 +15,7 @@ import atexit
 from openai import OpenAI
 from dotenv import load_dotenv
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 from src.tools.file_tools import list_files, read_file, search_in_files
 from src.tools.rag_tool import get_vector_store
