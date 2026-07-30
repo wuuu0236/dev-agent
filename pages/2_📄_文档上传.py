@@ -2,6 +2,7 @@
 页面 2：文档上传
 """
 import os
+from pathlib import Path
 import streamlit as st
 from src.database import list_kbs, add_document, update_document_status, list_documents
 from src.parser import parse_file
