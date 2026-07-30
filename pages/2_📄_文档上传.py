@@ -7,7 +7,7 @@ from src.database import list_kbs, add_document, update_document_status, list_do
 from src.parser import parse_file
 from src.chunker import chunk_parsed
 from src.vector_store import add_chunks, create_collection, collection_count
-from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, UPLOAD_DIR
+from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, UPLOAD_DIR, IMAGE_EXTENSIONS
 
 st.set_page_config(page_title="文档上传 - DataLens", page_icon="📄")
 
@@ -83,6 +83,7 @@ if uploaded_files:
 
             # 保存到本地
             file_path = UPLOAD_DIR / uf.name
+            ext = Path(uf.name).suffix.lower()
             with open(file_path, "wb") as f:
                 f.write(uf.getbuffer())
 
@@ -117,7 +118,9 @@ if uploaded_files:
                 # 4. 更新状态
                 update_document_status(doc_id, "ready", len(chunks))
                 success_count += 1
-                st.success(f"✅ {uf.name} → {len(parsed)} 段落 → {len(chunks)} chunks")
+                img_chunks = sum(1 for c in chunks if c.get("type") == "image")
+                ocr_note = f"（含 {img_chunks} 个图片/OCR 块）" if img_chunks else ""
+                st.success(f"✅ {uf.name} → {len(parsed)} 段落 → {len(chunks)} chunks{ocr_note}")
 
             except Exception as e:
                 st.error(f"❌ {uf.name} 处理失败: {str(e)}")
@@ -125,8 +128,8 @@ if uploaded_files:
                 fail_count += 1
 
             finally:
-                # 清理临时文件
-                if file_path.exists():
+                # 清理临时文件；图片类保留原图，供视觉模型后续读取
+                if file_path.exists() and ext not in IMAGE_EXTENSIONS:
                     os.remove(file_path)
 
         # 完成

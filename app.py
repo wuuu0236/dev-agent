@@ -28,6 +28,8 @@ st.sidebar.markdown("""
 - 🔍 混合检索（BM25 + 向量）
 - 🧠 LangGraph Agent
 - 📊 LLM-as-Judge 评估
+- 🖼️ 多模态 OCR（图片 / 扫描件）
+- 🔒 私有化离线（Ollama 可选）
 - 🗄️ SQLite + Chroma
 - 🚀 Streamlit 部署
 """)
@@ -48,7 +50,7 @@ with col1:
     | 问题 | DataLens 的做法 |
     |------|----------------|
     | ❌ 本地玩具 | ✅ **线上部署**，面试官点开就能用 |
-    | ❌ 假数据 | ✅ 上传**真实文档**，支持 PDF/Word/TXT |
+    | ❌ 假数据 | ✅ 上传**真实文档**，支持 PDF/Word/TXT + 图片(OCR)/扫描件 |
     | ❌ 没评估 | ✅ 内置 **LLM 评估面板**，量化展示检索质量 |
 
     ### 核心技术亮点

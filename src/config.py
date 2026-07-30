@@ -24,6 +24,29 @@ LLM_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_TEMPERATURE = 0.3  # RAG 场景用低温度，减少幻觉
 
+# --- 推理后端 ---
+# "cloud"  → 走 DeepSeek 等云端 API（默认，已部署 Demo 行为不变）
+# "ollama" → 走本地 Ollama，实现私有化 / 离线 / 数据不出域
+LLM_BACKEND = os.getenv("LLM_BACKEND", "cloud")
+
+# --- Ollama 私有化后端（仅 LLM_BACKEND=ollama 时生效）---
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:7b")
+# 视觉模型：填了才在命中图片块时调用本地视觉模型"真看图"；留空则图片只用 OCR 文字
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "")
+
+# --- Embedding 后端 ---
+# "cloud"  → 硅基流动 API（默认，零下载、秒级响应）
+# "ollama" → 本地 Ollama embedding（如 nomic-embed-text），实现完全离线索引
+EMBEDDING_BACKEND = os.getenv("EMBEDDING_BACKEND", "cloud")
+OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+
+# --- 多模态 / OCR ---
+# 是否对图片、扫描版 PDF 做本地 OCR（RapidOCR，纯 CPU、数据不出域）
+ENABLE_OCR = os.getenv("ENABLE_OCR", "true").lower() == "true"
+# 图片类型扩展名（解析层与上传层共用）
+IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".bmp", ".webp"]
+
 # --- Embedding API ---
 # 使用硅基流动 Embedding API，不需要下载本地模型
 # Streamlit Cloud 上不会卡进度条
@@ -43,4 +66,5 @@ VECTOR_WEIGHT = 1   # RRF 融合中向量检索的权重（调回 BM25_WEIGHT=1 
 
 # --- 安全配置 ---
 MAX_FILE_SIZE_MB = 20  # 上传文件大小限制
-ALLOWED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".csv"]
+ALLOWED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".csv",
+                      ".png", ".jpg", ".jpeg", ".bmp", ".webp"]  # 末尾为图片类型

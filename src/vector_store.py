@@ -60,7 +60,14 @@ def add_chunks(kb_id: str, chunks: list[dict]):
 
     ids = [f"{c['source']}_chunk{c['chunk_index']}" for c in chunks]
     metadatas = [
-        {"source": c["source"], "page": c.get("page") or 0, "chunk_index": c["chunk_index"]}
+        {
+            "source": c["source"],
+            "page": c.get("page") or 0,
+            "chunk_index": c["chunk_index"],
+            "type": c.get("type", "text"),
+            # Chroma 元数据不支持 None，空字符串占位；空串在下游视为无图
+            "image": c.get("image") or "",
+        }
         for c in chunks
     ]
 
@@ -94,6 +101,8 @@ def search_similar(kb_id: str, query: str, top_k: int = 5) -> list[dict]:
             "content": results["documents"][0][i],
             "source": results["metadatas"][0][i]["source"],
             "page": results["metadatas"][0][i].get("page", 0),
+            "type": results["metadatas"][0][i].get("type", "text"),
+            "image": results["metadatas"][0][i].get("image") or None,
             "score": 1 - results["distances"][0][i]  # Chroma 返回距离，转成相似度
         }
         for i in range(len(results["documents"][0]))
@@ -114,6 +123,8 @@ def get_all_chunks(kb_id: str) -> list[dict]:
             "content": results["documents"][i],
             "source": results["metadatas"][i]["source"],
             "page": results["metadatas"][i].get("page", 0),
+            "type": results["metadatas"][i].get("type", "text"),
+            "image": results["metadatas"][i].get("image") or None,
             "chunk_id": results["ids"][i]
         }
         for i in range(len(results["documents"]))

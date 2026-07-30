@@ -19,6 +19,8 @@
 - **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph，四个版本代码全部保留（v4 为主，v1-v3 见 src/agent/legacy/）。
 - **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前线上配置为纯向量检索（经 A/B 测试，当前文档场景下纯向量优于混合），保留 BM25 代码可一键切换。
 - **RAG 评估体系**：LLM-as-Judge 四维度（Recall / Precision / Faithfulness / Relevancy）打分；优化后 Context Precision 从 **0.64 → 0.87（+36%）**（基于自建测试集）。
+- **多模态文档解析**：基于 RapidOCR 的本地 OCR，支持**图片直读 + 扫描版 PDF 识别**，数据不出域；命中图片块时可接本地视觉模型（Ollama minicpm-v 等）真·看图。
+- **私有化 / 离线部署**：推理后端可一键切换为本地 **Ollama**（qwen2.5:7b 等），Embedding 亦可走本地模型，实现**完全离线、数据不出本机**的企业内网场景。
 - **多知识库隔离 + 评估面板**：SQLite 管理元数据、Chroma 管理向量，支持多知识库并行管理；Streamlit 评估面板对上传的真实文档直接跑 LLM 评估指标。
 - **MCP 工具暴露**：FastMCP 将 RAG 工具以 MCP 协议暴露，与 Claude Code 打通；文件工具带三层安全审查（黑名单 → 敏感文件检测 → 白名单）。
 - **一键部署**：Dockerfile + docker-compose 本地部署，Streamlit Cloud 线上托管，面试官打开链接就能演示。
@@ -103,14 +105,16 @@ curl -X POST http://localhost:8000/chat \
 
 | 层 | 技术 |
 |---|------|
-| LLM | DeepSeek API |
+| LLM | DeepSeek API（云端） / Ollama 本地模型（私有化可选） |
 | Agent 框架 | LangGraph（StateGraph） |
 | Web 前端 | Streamlit |
 | API | FastAPI + Uvicorn |
 | 数据库 | SQLite |
 | 向量库 | Chroma |
 | 检索 | BM25（jieba 分词）+ 向量 + RRF 融合 |
-| Embedding | text2vec-base-chinese（本地，免费） |
+| Embedding | 硅基流动 API（默认） / Ollama 本地模型（离线可选） |
+| 多模态解析 | RapidOCR 本地 OCR（图片直读 + 扫描版 PDF 识别） |
+| 视觉模型 | Ollama minicpm-v 等（命中图片块时真·看图，可选） |
 | 安全 | 三层审查：黑名单 + 敏感文件 + 白名单 |
 | 评估 | LLM-as-Judge（4 维度 1-5 分制） |
 | MCP | FastMCP |
@@ -124,6 +128,37 @@ curl -X POST http://localhost:8000/chat \
 用户提问 → 分块 → ┬── BM25（jieba 分词）─┐
                   └── 稠密向量语义检索 ────┴─→ RRF 融合 → LLM 生成答案 + 引用来源
 ```
+
+---
+
+## 🖼️ 多模态文档解析 & 私有化部署
+
+企业知识库里大量是**扫描合同、截图、带图表格**——纯文本解析会整页丢失。本项目在解析层无缝接入本地 OCR，并支持切换到本地推理后端，直接补齐这两块能力。
+
+### 1. 多模态解析（RapidOCR，本地、数据不出域）
+
+- **图片直读**：上传 PNG/JPG 等，经 RapidOCR 提取文字后切块入库，可被正常检索问答。
+- **扫描版 PDF**：文字层为空的页自动渲染成图并 OCR，避免扫描合同"有页无字"。
+- **视觉模型接地**（可选）：若配置了本地视觉模型（如 `minicpm-v:8b`），命中图片块时先由视觉模型"真看图"生成识别结果，再交主 LLM 综合回答并标注引用；云端文本模型模式则自动仅用 OCR 文字，**绝不向云端模型发送图片**。
+
+### 2. 私有化 / 离线部署（Ollama）
+
+通过设置环境变量切换推理后端，适配企业内网 / 数据合规场景：
+
+```bash
+# .env
+LLM_BACKEND=ollama
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_LLM_MODEL=qwen2.5:7b
+OLLAMA_VISION_MODEL=minicpm-v:8b      # 可选：启用真·看图
+
+EMBEDDING_BACKEND=ollama             # 可选：索引也走本地，完全离线
+OLLAMA_EMBED_MODEL=nomic-embed-text
+```
+
+- **推理阶段零云端依赖、断网可用**，文档与企业数据不出本机。
+- 前端「智能问答」页提供「⚙️ 模型设置」面板，可临时切换后端与视觉模型，无需改配置。
+- 默认仍为 `cloud`（DeepSeek）模式，已部署的线上 Demo 行为不变。
 
 ---
 

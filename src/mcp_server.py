@@ -18,7 +18,7 @@ logger = logging.getLogger("mcp_server")
 
 # 尝试导入 RAG 工具（你的知识库）
 # 新版统一检索，不再依赖 sentence-transformers
-from src.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
+from src.tools.legacy.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
 _HAS_RAG = True
 mcp = FastMCP("dev-agent-tools")
 

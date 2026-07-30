@@ -15,6 +15,7 @@ import json
 from openai import OpenAI
 from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from src.rag_agent import rag_query
+# 生产检索器（与已部署版本一致，基于 Chroma + BM25 + RRF）
 from src.hybrid_retriever import HybridRetriever
 
 _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)

@@ -92,6 +92,8 @@ class HybridRetriever:
                 "content": chunk["content"],
                 "source": chunk["source"],
                 "page": chunk["page"],
+                "type": chunk.get("type", "text"),
+                "image": chunk.get("image"),
                 "bm25_rank": rank,
                 "bm25_score": float(score)
             })
@@ -107,6 +109,8 @@ class HybridRetriever:
                 "content": r["content"],
                 "source": r["source"],
                 "page": r.get("page", 0),
+                "type": r.get("type", "text"),
+                "image": r.get("image"),
                 "rrf_score": VECTOR_WEIGHT / (k + r["vector_rank"])
             }
 
@@ -120,6 +124,8 @@ class HybridRetriever:
                     "content": r["content"],
                     "source": r["source"],
                     "page": r.get("page", 0),
+                    "type": r.get("type", "text"),
+                    "image": r.get("image"),
                     "rrf_score": bm25_contrib
                 }
 

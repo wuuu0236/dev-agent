@@ -69,17 +69,22 @@ def chunk_parsed(parsed_docs: list[dict]) -> list[dict]:
     """
     把解析后的文档列表切成 chunk 列表。
 
-    输入：[{text, page, source}, ...]  ← parse_file 的输出
-    输出：[{content, page, source, chunk_index}, ...]
+    输入：[{text, page, source, type?, image?}, ...]  ← parse_file 的输出
+    输出：[{content, page, source, chunk_index, type, image}, ...]
+          type/image 透传，供多模态检索与视觉模型读取原图。
     """
     chunks = []
     for doc in parsed_docs:
         text_parts = split_text(doc["text"])
+        doc_type = doc.get("type", "text")
+        doc_image = doc.get("image")
         for i, part in enumerate(text_parts):
             chunks.append({
                 "content": part,
                 "page": doc.get("page"),
                 "source": doc["source"],
-                "chunk_index": i
+                "chunk_index": i,
+                "type": doc_type,
+                "image": doc_image,
             })
     return chunks
