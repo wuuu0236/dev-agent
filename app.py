@@ -1,5 +1,5 @@
 ﻿"""
-DataLens — 生产级 RAG 知识库平台
+DataLens — 个人 RAG 知识库平台
 
 首页：项目介绍 + 导航入口
 """
@@ -56,7 +56,7 @@ with col1:
     ### 核心技术亮点
 
     - **混合检索**：BM25 关键词 + 向量语义，RRF 融合
-    - **多知识库**：每个知识库独立隔离，支持多用户场景
+    - **多知识库**：每个知识库独立隔离，可按主题分别建库管理
     - **文档解析**：PDF（PyMuPDF）+ Word（python-docx）+ 文本
     - **量化评估**：LLM-as-Judge 四维评估（Recall / Precision / Faithfulness / Relevancy）
     - **引用溯源**：每个回答标注来源文件和页码
