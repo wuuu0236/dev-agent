@@ -148,3 +148,27 @@ def collection_count(kb_id: str) -> int:
         return collection.count()
     except Exception:
         return 0
+
+
+def check_embedding_dim(kb_id: str) -> tuple[bool, str]:
+    """检查知识库 embedding 维度是否与当前配置一致。
+
+    不一致说明这个库是用旧模型建的（如 text2vec 768 维），当前 bge-large 1024 维
+    检索时会抛 dimension 错误。返回 (是否兼容, 提示)。
+    """
+    from src.config import EMBEDDING_DIM
+    try:
+        collection = _get_client().get_collection(_collection_name(kb_id))
+        got = collection.get(limit=1, include=["embeddings"])
+        emb = got.get("embeddings")
+        if emb is not None and len(emb) > 0:
+            dim = len(emb[0])
+            if dim == EMBEDDING_DIM:
+                return True, ""
+            return False, (
+                f"该知识库用 {dim} 维 embedding 模型构建，当前模型输出 {EMBEDDING_DIM} 维，"
+                f"检索会报维度不匹配。请用当前模型重新上传文档重建此库。"
+            )
+        return True, ""  # 空库无需检查
+    except Exception:
+        return True, ""  # 无法检查则放行，让实际检索报错

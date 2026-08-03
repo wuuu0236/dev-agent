@@ -1,17 +1,21 @@
 """
-页面 4：RAGAS 评估面板
+页面 4：RAGAS 评估面板（百分制 + 配置对比）
 
 为什么这个页面重要：
   面试官最想看的就是量化数据。「我做了一个 RAG」和
-  「我的 RAG 在公开文档上 Recall 87%、Precision 91%」
+  「我的 RAG 在公开文档上 Precision 87%、Relevancy 83%」
   是完全不同的说服力。
-"""
-import streamlit as st
-import pandas as pd
-from src.database import list_kbs, get_kb_stats
-from src.vector_store import collection_count
 
-# 演示测试集（不依赖 ragas 导入，避免 langchain 兼容性问题）
+两种评估引擎：
+  · RAGAS（默认）—— 业界标准框架，0-100 百分制，支持「同一测试集多组配置对比」+ 历史存档
+  · 手写 LLM Judge（对照/教学）—— 自实现四维打分，与 RAGAS 同方法论，1-5 分 ×20 转百分制
+"""
+import json
+import streamlit as st
+from src.database import list_kbs, get_kb_stats
+from src.vector_store import collection_count, check_embedding_dim
+
+# 演示测试集（基于 LangChain 公开文档，题型覆盖定义/对比/推理/应用/刁钻/细节）
 DEMO_QUESTIONS = [
     # --- 定义型：问「是什么」---
     {
@@ -46,18 +50,19 @@ DEMO_QUESTIONS = [
         "reference": "因为向量分数和 BM25 分数的尺度不同，不在同一量级上，无法直接比较。RRF 只关心排名，避免了分数归一化的问题。",
         "type": "推理型"
     },
-    # --- 刁钻型：换个说法问，文档里没有原话 ---
+    # --- 应用型 ---
     {
-        "question": "假如我有一个智能客服系统，用户问「怎么退款」，Agent 需要先去知识库查退款政策，然后判断问题是否已解决，没解决就追问用户。这个流程如果用 LangGraph 实现，大概的图结构长什么样？",
+        "question": "假如我有一个智能客服系统，用户问「怎么退款」，Agent 需要先去知识库查退款政策，然后判断问题是否已解决。这个流程如果用 LangGraph 实现，大概的图结构长什么样？",
         "reference": "START → LLM节点（理解问题）→ 工具节点（检索退款政策）→ 条件判断（是否解决）→ 如果未解决则追问用户并回到 LLM 节点，如果已解决则结束。这是一个典型的循环 Agent 图。",
         "type": "应用型"
     },
+    # --- 刁钻型：换个说法问，文档里没有原话 ---
     {
         "question": "overlap 设置为 50 是为了解决什么具体问题？如果不设 overlap 会怎样？",
         "reference": "Overlap 防止关键信息刚好落在两个 chunk 的分界线上被切断。50 字大约一句中文的长度。如果不设 overlap，关键信息可能被切断，导致检索不到完整的上下文。",
         "type": "刁钻型"
     },
-    # --- 边界型：问细节参数 ---
+    # --- 细节型：问细节参数 ---
     {
         "question": "RRF 公式中的平滑常数 k 一般取多少？它有什么作用？",
         "reference": "k 通常取 60，作用是避免分母太小导致排名靠后的文档分数异常放大，让融合结果更稳定。",
@@ -70,121 +75,225 @@ DEMO_QUESTIONS = [
     }
 ]
 
-st.set_page_config(page_title="评估面板 - DataLens", page_icon="📊")
+# 与 knowledge/ 公开文档库内容对齐的演示测试集（配合该库可跑出高分为例）
+DEMO_QUESTIONS_MATCHED = [
+    {"question": "AI Agent 的三个核心要素是什么？",
+     "reference": "AI Agent 的三个核心要素是 LLM（大脑，理解意图、决定行动）、工具 Tools（执行实际操作）、循环 Loop（思考→行动→观察）。", "type": "定义型"},
+    {"question": "RAG 解决了 LLM 的哪两个核心问题？",
+     "reference": "RAG 解决了 LLM 的知识截止日期（不知道训练后的新知识）和幻觉（可能编造不存在的事实）两个核心问题。", "type": "定义型"},
+    {"question": "MCP 协议是谁提出的？它要解决什么核心问题？",
+     "reference": "MCP（模型上下文协议）由 Anthropic 提出，让 AI 模型自动发现和调用外部工具，解决不同应用工具调用方式不统一、不能跨应用复用的问题。", "type": "定义型"},
+    {"question": "LangGraph 的核心概念是什么？",
+     "reference": "LangGraph 的核心是 StateGraph：把 Agent 流程定义成节点和边的有向图，状态在节点之间流转。", "type": "定义型"},
+    {"question": "Dev Agent 项目使用什么技术栈？",
+     "reference": "Dev Agent 是基于 LangGraph + FastAPI 的 AI 开发助手，能操作本地文件、搜索知识库，支持 HTTP API 和 Docker 部署。", "type": "定义型"},
+]
 
+st.set_page_config(page_title="评估面板 - DataLens", page_icon="📊")
 st.title("📊 检索质量评估")
 
 st.markdown("""
-使用 **LLM Judge** 对知识库做量化评估（1-5 分制）：
-- **Context Recall**：检索到的文档是否包含答案所需的信息
-- **Context Precision**：相关文档是否排在检索结果的前面
-- **Faithfulness**：生成的答案是否完全来自文档（有无幻觉）
-- **Answer Relevancy**：答案是否与问题相关
-
-> 评估方式：将「问题 + 检索结果 + 生成答案 + 参考答案」交给 DeepSeek 逐项打分。
+- **RAGAS 四维指标**（0-100 百分制）：Context Recall / Precision（检索质量）· Faithfulness（有无幻觉）· Answer Relevancy（是否切题）
+- **配置对比**：同一测试集跑多组 top_k，量化「调参到底有没有用」
+- **历史存档**：每次对比自动保存，可回看「上次 vs 这次」
 """)
 
-# --- 选择知识库 ---
+
+# ---------- 辅助函数 ----------
+
+_METRIC_LABELS = {
+    "context_precision": "Context Precision",
+    "context_recall": "Context Recall",
+    "faithfulness": "Faithfulness",
+    "answer_relevancy": "Answer Relevancy",
+}
+
+
+def _show_metrics(metrics: dict):
+    """四张百分制指标卡。"""
+    cols = st.columns(4)
+    for col, name in enumerate(["context_precision", "context_recall", "faithfulness", "answer_relevancy"]):
+        v = metrics.get(name, 0)
+        cols[col].metric(_METRIC_LABELS[name], f"{v:.1f}%")
+
+
+def _show_details(details: list[dict]):
+    """逐题明细。"""
+    with st.expander("🔍 逐题明细"):
+        for i, d in enumerate(details, 1):
+            st.markdown(f"**Q{i}:** {d['question']}")
+            if d.get("answer"):
+                st.markdown(f"*A:* {d['answer'][:220]}")
+            if d.get("scores"):
+                st.caption("   ".join(f"{_METRIC_LABELS[k]}: {v:.1f}%" for k, v in d["scores"].items() if k in _METRIC_LABELS))
+            st.divider()
+
+
+def _show_comparison(cmp: dict):
+    """配置对比结果：并排表格 + 逐题对比。"""
+    import pandas as pd
+    rows = []
+    for res in cmp.get("results", []):
+        row = {"配置": res["name"]}
+        row.update({_METRIC_LABELS[k]: f"{v:.1f}%" for k, v in res.get("metrics", {}).items()})
+        rows.append(row)
+    if not rows:
+        return
+    st.markdown(f"**对比结果（{cmp.get('test_size', 0)} 题 · {cmp.get('timestamp', '')}）**")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    with st.expander("🔍 逐题对比"):
+        results = cmp.get("results", [])
+        if not results:
+            return
+        n = len(results[0].get("details", []))
+        for i in range(n):
+            st.markdown(f"**Q{i + 1}:** {results[0]['details'][i]['question']}")
+            for res in results:
+                sc = res["details"][i].get("scores", {})
+                line = "  ".join(f"{_METRIC_LABELS[k]}: {v:.1f}%" for k, v in sc.items() if k in _METRIC_LABELS)
+                st.caption(f"· {res['name']}: {line}")
+            st.divider()
+
+
+# ---------- 选择知识库 ----------
+
 kbs = list_kbs()
 if not kbs:
-    st.warning("请先创建知识库并上传文档。")
+    st.warning("请先在「知识库管理」中创建知识库并上传文档。")
     st.stop()
 
 kb_names = {kb["name"]: kb["id"] for kb in kbs}
 selected_name = st.selectbox("选择要评估的知识库", list(kb_names.keys()), key="eval_kb")
 kb_id = kb_names[selected_name]
 
-# 检查是否有 chunk
-if collection_count(kb_id) == 0:
+stats = get_kb_stats(kb_id)
+if stats["total_chunks"] == 0:
     st.warning("该知识库还没有文档，请先上传。")
     st.stop()
 
-# --- 测试集 ---
+compat, compat_msg = check_embedding_dim(kb_id)
+if not compat:
+    st.error(f"⚠️ {compat_msg}")
+st.caption(f"📊 {stats['doc_count']} 个文档 | {stats['total_chunks']} 个 chunk")
+
+
+# ---------- 测试集 ----------
+
 st.subheader("📝 测试集")
+demo_choice = st.selectbox(
+    "测试集来源",
+    ["内置·LangGraph 深度题（10 题）", "内置·匹配公开文档库（5 题）", "自定义 JSON"],
+    help="「匹配公开文档库」的题直接对准 knowledge/ 目录内容，配合「公开文档」库可跑出高分为例；自定义 JSON 用于评估你自己的知识库。",
+)
 
-use_demo = st.checkbox("使用内置演示测试集（基于 LangChain 公开文档）", value=True)
-
-if use_demo:
+if demo_choice == "内置·LangGraph 深度题（10 题）":
     questions = DEMO_QUESTIONS
-    st.caption(f"共 {len(questions)} 条测试问题")
+    st.caption(f"共 {len(questions)} 条（题型覆盖定义/对比/推理/应用/刁钻/细节）")
+    with st.expander("查看测试问题"):
+        for i, q in enumerate(questions, 1):
+            st.markdown(f"**{i}.** {q['question']}（{q['type']}）")
+elif demo_choice == "内置·匹配公开文档库（5 题）":
+    questions = DEMO_QUESTIONS_MATCHED
+    st.caption(f"共 {len(questions)} 条，直接对齐 knowledge/ 公开文档内容")
     with st.expander("查看测试问题"):
         for i, q in enumerate(questions, 1):
             st.markdown(f"**{i}.** {q['question']}")
 else:
-    st.info("自定义测试集：在下方输入问题和参考答案（JSON 格式）")
-    custom_input = st.text_area(
-        "测试集 JSON",
-        placeholder='[{"question": "...", "reference": "..."}, ...]',
-        height=200
-    )
+    st.info("自定义测试集：JSON 格式 [{\"question\": ..., \"reference\": ...}, ...]")
+    custom_input = st.text_area("测试集 JSON", placeholder='[{"question": "...", "reference": "..."}]', height=180)
     if custom_input:
         try:
-            import json
             questions = json.loads(custom_input)
+            if not questions:
+                st.warning("JSON 数组为空")
         except json.JSONDecodeError:
             st.error("JSON 格式错误")
             questions = []
     else:
         questions = []
 
-# --- 运行评估 ---
-if st.button("🚀 开始评估", type="primary", disabled=not questions):
-    if not st.session_state.get("deepseek_api_key") and not __import__("os").getenv("DEEPSEEK_API_KEY"):
-        st.error("请设置 DEEPSEEK_API_KEY 环境变量")
-    else:
-        with st.spinner("评估运行中，可能需要 1-2 分钟..."):
-            try:
-                # 延迟导入，避免页面加载时触发 ragas 的兼容性问题
-                from src.evaluation import run_evaluation
-                result = run_evaluation(kb_id, questions)
+if not questions:
+    st.stop()
 
-                if "error" in result.get("metrics", {}):
-                    st.error(f"评估出错: {result['metrics']['error']}")
-                else:
-                    metrics = result["metrics"]
 
-                    # --- 指标卡片（1-5 分制） ---
-                    st.subheader("📊 评估结果")
-                    col1, col2, col3, col4 = st.columns(4)
+# ---------- 引擎选择 + 运行 ----------
 
-                    with col1:
-                        st.metric("Context Recall", f"{metrics['context_recall']:.1f} / 5")
-                    with col2:
-                        st.metric("Context Precision", f"{metrics['context_precision']:.1f} / 5")
-                    with col3:
-                        st.metric("Faithfulness", f"{metrics['faithfulness']:.1f} / 5")
-                    with col4:
-                        st.metric("Answer Relevancy", f"{metrics['answer_relevancy']:.1f} / 5")
+engine = st.radio("评估引擎", ["RAGAS（0-100，推荐）", "手写 LLM Judge（对照）"], horizontal=True)
 
-                    # --- 对比实验说明 ---
-                    st.subheader("📈 对比实验")
-                    st.markdown("""
-                    | 方案 | Context Recall | Context Precision | 说明 |
-                    |------|:--:|:--:|------|
-                    | 纯向量检索 | 基准线 | 基准线 | 语义匹配强，关键词弱 |
-                    | 纯 BM25 | 低 | 低 | 关键词匹配，无语义 |
-                    | **混合检索** | **见上方** | **见上方** | BM25 + 向量 + RRF 融合 |
-                    """)
 
-                    # --- 详细结果 ---
-                    with st.expander("🔍 每个问题的详细结果"):
-                        for i, detail in enumerate(result["details"], 1):
-                            st.markdown(f"**Q{i}:** {detail['question']}")
-                            st.markdown(f"**A:** {detail['answer'][:200]}...")
-                            st.divider()
+def _run_with_guard(fn, *a, **kw):
+    """统一错误兜底：检索/评估失败给可读提示。"""
+    try:
+        return fn(*a, **kw)
+    except Exception as e:
+        msg = str(e)
+        if "dimension" in msg.lower() or "embedding" in msg.lower():
+            st.error(f"❌ 知识库 embedding 维度与当前模型不匹配（详见上方提示）。请用当前模型重新上传文档。")
+        else:
+            st.error(f"❌ 评估失败: {type(e).__name__}: {msg}")
+        return None
 
-            except Exception as e:
-                st.error(f"评估失败: {str(e)}")
-                st.info("提示：RAGAS 评估需要调用 LLM API，请确保 DEEPSEEK_API_KEY 已设置且余额充足。")
 
-# --- 关于评估 ---
+if engine.startswith("RAGAS"):
+    # 延迟导入，避免页面加载时引入 RAGAS/评估重依赖
+    from src.evaluation_ragas import run_ragas_eval, compare_configs
+
+    st.subheader("🏃 单配置评估")
+    top_k = st.slider("检索 top_k", 1, 10, 5, key="ragas_topk")
+    if st.button("🚀 跑 RAGAS 评估", type="primary", disabled=not questions):
+        with st.spinner("RAGAS 每题会多次调用 LLM，10 题约 1-2 分钟..."):
+            res = _run_with_guard(run_ragas_eval, kb_id, questions, top_k=top_k)
+            if res and "error" not in res:
+                _show_metrics(res["metrics"])
+                _show_details(res["details"])
+            elif res:
+                st.error(f"❌ {res['error']}")
+
+    st.divider()
+
+    st.subheader("📈 配置对比（对比评分）")
+    st.caption("同一测试集、多组 top_k 各跑一遍——量化「检索深度调到多少最好」。对比可保存进历史。")
+    topk_options = st.multiselect("对比哪些 top_k", [3, 5, 8, 10], default=[3, 5], key="ragas_topk_cmp")
+    save_hist = st.checkbox("保存结果到历史存档", value=True)
+    if st.button("🚀 跑配置对比", type="primary", disabled=not questions or len(topk_options) < 2):
+        configs = [{"name": f"top_k={k}", "top_k": k} for k in topk_options]
+        with st.spinner(f"对比中（{len(configs)} 组配置，耗时约 = 单配置 × {len(configs)}）..."):
+            cmp = _run_with_guard(compare_configs, kb_id, questions, configs, save=save_hist)
+            if cmp and "error" not in cmp:
+                _show_comparison(cmp)
+            elif cmp:
+                st.error(f"❌ {cmp['error']}")
+
+else:
+    # 手写 LLM Judge（对照/教学）
+    from src.evaluation import run_evaluation
+
+    st.caption("自实现四维 LLM Judge，1-5 分 ×20 转百分制，与 RAGAS 同方法论，可对照两种引擎的结果。")
+    if st.button("🚀 跑手写评估", type="primary", disabled=not questions):
+        with st.spinner("评估中（每题一次检索 + 一次打分）..."):
+            res = _run_with_guard(run_evaluation, kb_id, questions)
+            if res and "error" not in res:
+                metrics = {k: round(v * 20, 1) for k, v in res["metrics"].items()}
+                details = [{**d, "scores": {k: round(v * 20, 1) for k, v in d.get("scores", {}).items()}} for d in res["details"]]
+                _show_metrics(metrics)
+                _show_details(details)
+            elif res:
+                st.error(f"❌ {res['error']}")
+
+
+# ---------- 历史存档 ----------
+
 st.divider()
-st.markdown("""
-### 💡 关于评估方式
+st.subheader("🗂️ 历史存档")
+from src.evaluation_ragas import list_history, load_history
 
-采用 **LLM Judge** 模式：将检索结果和生成的答案交给 DeepSeek 逐项打分（1-5 分制）。
-相比 RAGAS 框架，这种方式：
-- 不依赖第三方包，无兼容性问题
-- 评估逻辑透明（每次打分都会显示详细原因）
-- 面试时可以说清楚「评估是怎么做的」
-""")
+history = list_history()
+if not history:
+    st.caption("暂无存档。跑「配置对比」并勾选保存后，结果会出现在这里。")
+else:
+    labels = {f"[{h['timestamp']}] {', '.join(h['configs'])}（{h['test_size']}题）": h["file"] for h in history}
+    sel_label = st.selectbox("查看历史对比结果", list(labels.keys()))
+    data = load_history(labels[sel_label])
+    if data:
+        _show_comparison(data)

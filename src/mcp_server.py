@@ -16,10 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("mcp_server")
 
-# 尝试导入 RAG 工具（你的知识库）
-# 新版统一检索，不再依赖 sentence-transformers
-from src.tools.legacy.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
-_HAS_RAG = True
+# 统一检索入口（新版，不再依赖 sentence-transformers）
+from src.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
 mcp = FastMCP("dev-agent-tools")
 
 
@@ -37,24 +35,18 @@ def hello() -> str:
 def search_user_knowledge(query: str) -> str:
     """搜索用户的知识库（向量语义搜索）。
     当用户问「知识库里有什么」「之前学了什么」「Agent 是什么」时使用。"""
-    if not _HAS_RAG:
-        return "知识库暂不可用。sentence-transformers 与 Python 3.13 有兼容问题，需要等待库升级。"
     return search_knowledge(query)
 
 
 @mcp.tool()
 def add_user_knowledge(texts: list[str]) -> str:
     """把文本添加到用户的知识库。当用户说「记住」「存下来」时使用。"""
-    if not _HAS_RAG:
-        return "知识库暂不可用。sentence-transformers 与 Python 3.13 有兼容问题。"
     return add_knowledge(texts)
 
 
 @mcp.tool()
 def load_file_to_user_knowledge(filepath: str) -> str:
     """把文件加载到知识库。当用户说「学习这个文件」「记住这个文件」时使用。"""
-    if not _HAS_RAG:
-        return "知识库暂不可用。sentence-transformers 与 Python 3.13 有兼容问题。"
     # 安全检查：防止路径穿越（如 ../ 绕过白名单）
     from src.tools.safety import check_path_safety
     safe, reason = check_path_safety(filepath)
@@ -67,7 +59,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print("[MCP Server] 开发助手工具服务器")
     print("=" * 50)
-    print(f"RAG 工具: {'可用' if _HAS_RAG else '暂不可用（依赖版本问题）'}")
+    print("RAG 工具: 可用")
     print("已注册工具:")
     print("  - hello")
     print("  - search_user_knowledge")

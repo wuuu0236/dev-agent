@@ -15,8 +15,6 @@ import json
 from openai import OpenAI
 from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from src.rag_agent import rag_query
-# 生产检索器（与已部署版本一致，基于 Chroma + BM25 + RRF）
-from src.hybrid_retriever import HybridRetriever
 
 _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
@@ -118,11 +116,9 @@ def run_evaluation(kb_id: str, test_questions: list[dict]) -> dict:
     details = []
 
     for item in test_questions:
-        # 跑 RAG
+        # 跑 RAG（rag_query 内部已完成检索，contexts 顺带返回，这里不再二次检索）
         result = rag_query(kb_id, item["question"])
-        retriever = HybridRetriever(kb_id)
-        contexts = retriever.search(item["question"], top_k=5)
-        context_texts = [c["content"] for c in contexts]
+        context_texts = [c["content"] for c in result.get("contexts", [])]
 
         # LLM 打分
         scores = judge_single(

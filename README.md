@@ -18,7 +18,7 @@
 
 - **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph，四个版本代码全部保留（v4 为主，v1-v3 见 src/agent/legacy/）。
 - **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前线上配置为纯向量检索（经 A/B 测试，当前文档场景下纯向量优于混合），保留 BM25 代码可一键切换。
-- **RAG 评估体系**：LLM-as-Judge 四维度（Recall / Precision / Faithfulness / Relevancy）打分；优化后 Context Precision 从 **0.64 → 0.87（+36%）**（基于自建测试集）。
+- **RAG 评估体系**：基于业界标准 **ragas** 的四维量化评估（0-100 百分制），支持「同一测试集多配置对比」+ 历史存档；另保留手写 LLM Judge 作对照。
 - **多模态文档解析**：基于 RapidOCR 的本地 OCR，支持**图片直读 + 扫描版 PDF 识别**，数据不出域；命中图片块时可接本地视觉模型（Ollama minicpm-v 等）真·看图。
 - **私有化 / 离线部署**：推理后端可一键切换为本地 **Ollama**（qwen2.5:7b 等），Embedding 亦可走本地模型，实现**完全离线、数据不出本机**的本地个人使用。
 - **多知识库隔离 + 评估面板**：SQLite 管理元数据、Chroma 管理向量，支持多知识库并行管理；Streamlit 评估面板对上传的真实文档直接跑 LLM 评估指标。
@@ -116,7 +116,7 @@ curl -X POST http://localhost:8000/chat \
 | 多模态解析 | RapidOCR 本地 OCR（图片直读 + 扫描版 PDF 识别） |
 | 视觉模型 | Ollama minicpm-v 等（命中图片块时真·看图，可选） |
 | 安全 | 三层审查：黑名单 + 敏感文件 + 白名单 |
-| 评估 | LLM-as-Judge（4 维度 1-5 分制） |
+| 评估 | RAGAS（0-100 百分制）+ 手写 LLM Judge 对照 |
 | MCP | FastMCP |
 | 部署 | Docker + Streamlit Cloud |
 
@@ -162,27 +162,32 @@ OLLAMA_EMBED_MODEL=nomic-embed-text
 
 ---
 
-## 📊 评估体系
+## 📊 评估体系（RAGAS · 百分制）
 
-采用 LLM-as-Judge 对 RAG 质量做量化评估。将「问题 + 检索结果 + 生成答案 + 参考答案」交给 DeepSeek，逐项打分（1-5 分制）：
+用业界标准框架 **ragas** 对 RAG 质量做量化评估（0-100 百分制）。将「问题 + 检索结果 + 生成答案 + 参考答案」喂给 ragas 四指标：
 
-| 指标 | 衡量什么 |
-|------|------|
-| Context Recall | 检索结果是否覆盖了答案所需信息 |
-| Context Precision | 相关文档是否排在检索结果前面 |
-| Faithfulness | 答案是否忠实于文档（有无幻觉） |
-| Answer Relevancy | 答案是否直接回应了问题 |
-
-测试集覆盖 6 种题型（定义型、对比型、推理型、应用型、刁钻型、细节型），支持自定义测试集和 A/B 对比实验。
-
-**优化前后（50 题测试集）**：
-
-| 指标 | v1 基础 RAG | v2 混合检索 + 优化 |
+| 指标 | 衡量什么 | 计算机制 |
 |------|------|------|
-| Context Precision | 0.64 | **0.87（+36%）** |
-| Context Recall | 0.71 | **0.85** |
-| Faithfulness | 0.82 | **0.91** |
-| Answer Relevancy | 0.78 | **0.89** |
+| Context Recall | 检索结果是否覆盖答案所需信息 | LLM 判相关 |
+| Context Precision | 相关文档是否排在检索结果前面 | LLM 判相关 + 排名 |
+| Faithfulness | 答案是否忠实于文档（有无幻觉） | 把答案拆成原子命题逐条核对 |
+| Answer Relevancy | 答案是否直接回应问题 | 语义相似度（embedding） |
+
+关键能力：
+
+- **配置对比（对比评分）**：同一测试集、多组检索配置（如 top_k=3/5）各跑一遍，量化「调参到底有没有用」。
+- **历史存档**：每次对比自动存 JSON，面板可回看「上次 vs 这次」。
+- **可复现**：面板选知识库 → 跑 RAGAS / 配置对比，数字能重新得到。
+- **手写 Judge 对照**：另保留自实现四维 LLM Judge（与 RAGAS 同方法论），可交叉验证。
+
+示例结果（公开文档库 16 chunk · 10 题测试集 · 实时测得）：
+
+| 配置 | Context Precision | Context Recall | Faithfulness | Answer Relevancy |
+|------|:---:|:---:|:---:|:---:|
+| top_k=3 | 47.5% | 25.0% | 55.6% | 39.5% |
+| top_k=5 | 47.0% | 25.0% | 59.3% | 37.9% |
+
+> ⚠️ 数字取决于「测试集 ↔ 知识库内容」的匹配度：库里没有的题，Context Recall 会诚实地归零（如 RRF 相关题在示例里是 0）。评估衡量的是「给定这个库，检索 + 回答好不好」，而非固定分数——换个匹配的知识库/测试集即可重新测得。
 
 ---
 

@@ -13,19 +13,19 @@ v2 改动：/chat 接口从 while 循环换成 LangGraph 图
 
 import os
 import sys
-import json
+import asyncio
 import logging
 import io
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# ⭐ 直接导入 LangGraph 图，不再在这里写 while 循环
-from src.agent.dev_agent_langgraph import graph
+# ⭐ 统一入口：跑 LangGraph 图 + 提取最终答案，都在 run_agent 里
+from src.agent.dev_agent_langgraph import run_agent
 
 load_dotenv()
 
@@ -109,48 +109,18 @@ def chat(request: ChatRequest):
     向 Agent 提问
 
     流程：
-      收到 HTTP 请求 → 构造 State → graph.stream() 跑图 → 提取最终答案 → 返回 JSON
+      收到 HTTP 请求 → run_agent() 跑图 → 返回 {answer, steps}
 
-    server.py 不再管「怎么调 AI」「怎么调工具」这些细节，
-    全部交给 dev_agent_langgraph.py 的图处理。
+    server.py 不再管「怎么调 AI」「怎么调工具」「怎么提取最终答案」，
+    全部收敛到 dev_agent_langgraph.py 的 run_agent()。
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
-
     logger.info(f"收到问题: {request.question[:50]}...")
 
-    # 构造图的初始状态
-    initial_state = {
-        "messages": [
-            SystemMessage(content=f"你是开发助手 Agent。工作目录: {request.work_dir}"),
-            HumanMessage(content=request.question),
-        ],
-        "step_count": 0,
-    }
-
-    # 跑图！图会自动：调 AI → 调工具 → 调 AI → ... → 回答
-    final_answer = ""
-    final_step = 0
-    last_event = None
-
-    for event in graph.stream(initial_state):
-        last_event = event
-
-    # 图跑完了，提取最终答案
-    if last_event:
-        # 最后一个事件是 call_model 节点的输出
-        node_data = last_event.get("call_model", {})
-        msgs = node_data.get("messages", [])
-        final_step = node_data.get("step_count", 0)
-        if msgs:
-            last_msg = msgs[-1]
-            final_answer = getattr(last_msg, 'content', str(last_msg))
-
-    if not final_answer:
-        final_answer = "抱歉，Agent 没有生成回答。"
+    result = run_agent(request.question, work_dir=request.work_dir, session_id="api")
 
     return ChatResponse(
-        answer=final_answer,
-        steps=final_step,
+        answer=result["answer"],
+        steps=result["steps"],
         timestamp=datetime.now().isoformat(),
     )
 
@@ -158,58 +128,25 @@ def chat(request: ChatRequest):
 @app.post(
     "/chat/stream",
     summary="发送问题（流式版）",
-    description="和 /chat 一样，但最终答案会一个字一个字返回。",
+    description="和 /chat 一样，但最终答案会分块流式返回（打字机效果）。",
 )
 async def chat_stream(request: ChatRequest):
     """
     向 Agent 提问，答案流式输出
 
-    分两步：
-      ① 用图跑完工具调用阶段（非流式）
-      ② 最终回答用流式输出（打字机效果）
+    图只跑一次（和 /chat 开销相同），拿到最终答案后按小块吐给前端。
+    旧版会在图跑完后【再调一次 LLM 流式接口】——费用翻倍，且两次生成的
+    答案可能不一致。现在答案以 /chat 为准，分块输出只负责「打字机效果」。
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
-    from src.agent.dev_agent_langgraph import _langchain_to_openai
-
     async def generate():
-        # ── 第一步：用图跑完工具调用 ──
-        # 图只负责「调 AI → 调工具 → 调 AI → ...」这个循环
-        # 最后的「回答」不在图里做，而是单独用流式 API
-        state = {
-            "messages": [
-                SystemMessage(content=f"你是开发助手 Agent。工作目录: {request.work_dir}"),
-                HumanMessage(content=request.question),
-            ],
-            "step_count": 0,
-        }
+        result = run_agent(request.question, work_dir=request.work_dir, session_id="api-stream")
+        answer = result["answer"]
 
-        last_event = None
-        for event in graph.stream(state):
-            last_event = event
-
-        if not last_event:
-            yield "抱歉，Agent 没有生成回答。"
-            return
-
-        # 拿出图跑完后的完整对话历史
-        messages = last_event.get("call_model", {}).get("messages", [])
-
-        # ── 第二步：不管图里有什么答案，重新调一次流式 API ──
-        # 这样能确保用户看到打字机效果
-        from openai import OpenAI
-        client = OpenAI(
-            api_key=os.getenv("DEEPSEEK_API_KEY"),
-            base_url="https://api.deepseek.com",
-        )
-        openai_messages = _langchain_to_openai(messages)
-        stream = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=openai_messages,
-            stream=True,
-        )
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        # 分块输出：块太大等于一次返回，块太小切碎中文读感差
+        chunk_size = 8
+        for i in range(0, len(answer), chunk_size):
+            yield answer[i:i + chunk_size]
+            await asyncio.sleep(0.03)
 
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 

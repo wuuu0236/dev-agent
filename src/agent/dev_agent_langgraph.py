@@ -24,19 +24,23 @@ from langgraph.graph.message import add_messages
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.tools.file_tools import list_files, read_file, search_in_files
-from src.tools.legacy.hybrid_retriever import search_knowledge, load_file_to_knowledge, add_knowledge
+from src.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
 
 load_dotenv()
 
-# --- Langfuse 观测层 ---
-# 每一次 graph.stream() 挂上 CallbackHandler，
-# Langfuse 面板会自动记录 call_model / call_tools 两个节点的完整 span。
-from langfuse.langchain import CallbackHandler
-
-langfuse_handler = CallbackHandler()  # 自动从 LANGFUSE_PUBLIC_KEY / SECRET_KEY / HOST 环境变量读取
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("langgraph_agent")
+
+# --- Langfuse 观测层（可选）---
+# 每一次 graph.stream() 挂上 CallbackHandler，
+# Langfuse 面板会自动记录 call_model / call_tools 两个节点的完整 span。
+# 缺 langchain 包或缺 Langfuse 密钥时降级为不观测，Agent 主流程不受影响。
+langfuse_handler = None
+try:
+    from langfuse.callback.langchain import LangchainCallbackHandler
+    langfuse_handler = LangchainCallbackHandler()  # 自动从 LANGFUSE_PUBLIC_KEY / SECRET_KEY / HOST 环境变量读取
+except Exception as e:
+    logger.warning(f"Langfuse 不可用，本次会话不观测: {e}")
 
 # ================================================================
 # 第 1 步：定义 State（图中流动的数据）
@@ -331,8 +335,16 @@ graph = workflow.compile()
 # 第 5 步：运行
 # ================================================================
 
-def run_agent(question: str, work_dir: str = "C:/Users/24162/Desktop"):
-    """运行 LangGraph Agent（使用方式和 v3 一样）"""
+def run_agent(question: str, work_dir: str = "C:/Users/24162/Desktop",
+              session_id: str = "api") -> dict:
+    """
+    运行 LangGraph Agent，返回 {"answer": str, "steps": int}。
+
+    「跑图 → 提取最终答案」只在这里做一遍：
+      · API 的 /chat、/chat/stream 走这里
+      · CLI 交互走这里
+    避免最终答案提取逻辑散落在多个文件里（每处还容易改漏）。
+    """
     from langchain_core.messages import HumanMessage, SystemMessage
 
     initial_state = {
@@ -345,32 +357,33 @@ def run_agent(question: str, work_dir: str = "C:/Users/24162/Desktop"):
 
     logger.info(f"收到问题: {question[:50]}...")
 
-    # graph.stream() 每次 yield 一个节点执行的结果
     final_answer = ""
-    for event in graph.stream(
-        initial_state,
-        config={
-            "callbacks": [langfuse_handler],
-            "metadata": {"session_id": "cli-run", "user_question": question[:80]},
-            "run_name": "dev-agent-langgraph",
-        },
-    ):
+    final_step = 0
+    stream_config: dict = {
+        "metadata": {"session_id": session_id, "user_question": question[:80]},
+        "run_name": "dev-agent-langgraph",
+    }
+    if langfuse_handler is not None:
+        stream_config["callbacks"] = [langfuse_handler]
+
+    for event in graph.stream(initial_state, config=stream_config):
         node_name = list(event.keys())[0]
         node_data = event[node_name]
-        if "messages" in node_data:
-            msgs = node_data["messages"]
-            last_msg = msgs[-1]
-            preview = str(getattr(last_msg, 'content', ''))[:80].replace('\n', ' ')
-            logger.debug(f"[{node_name}] {preview}")
-        # 捕获最终答案：call_model 节点且没有 tool_calls 时
+
+        # 捕获最终答案：call_model 节点且没有 tool_calls 时，就是 AI 的直接回答
+        # （有 tool_calls 的消息 content 通常为空，会被天然跳过）
         if node_name == "call_model":
             msgs = node_data.get("messages", [])
+            final_step = node_data.get("step_count", final_step)
             if msgs:
                 last = msgs[-1]
                 if not getattr(last, 'tool_calls', None):
                     final_answer = getattr(last, 'content', str(last))
 
-    return final_answer or "抱歉，Agent 没有生成回答。"
+    return {
+        "answer": final_answer or "抱歉，Agent 没有生成回答。",
+        "steps": final_step,
+    }
 
 
 # ================================================================
@@ -392,38 +405,6 @@ if __name__ == "__main__":
             print("再见！")
             break
 
-        # run_agent 现在只打日志，不打印中间过程
-        # 最终回答在下面手动输出
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        initial_state = {
-            "messages": [
-                SystemMessage(content=f"你是开发助手 Agent。工作目录: C:/Users/24162/Desktop"),
-                HumanMessage(content=q),
-            ],
-            "step_count": 0,
-        }
-
-        final_answer = ""
-        for event in graph.stream(
-            initial_state,
-            config={
-                "callbacks": [langfuse_handler],
-                "metadata": {"session_id": "cli-interactive", "user_question": q[:80]},
-                "run_name": "dev-agent-langgraph",
-            },
-        ):
-            node_name = list(event.keys())[0]
-            if node_name == "call_model":
-                msgs = event["call_model"].get("messages", [])
-                if msgs:
-                    last = msgs[-1]
-                    # 如果 AI 直接回答了（没有 tool_calls），就是最终答案
-                    if not getattr(last, 'tool_calls', None):
-                        final_answer = getattr(last, 'content', str(last))
-
-        if not final_answer:
-            final_answer = "抱歉，Agent 没有生成回答。"
-
-        print(f"\n[Agent] {final_answer}")
+        result = run_agent(q, work_dir="C:/Users/24162/Desktop", session_id="cli-interactive")
+        print(f"\n[Agent] {result['answer']}")
         print("-" * 50)

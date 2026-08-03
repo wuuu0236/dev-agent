@@ -13,7 +13,7 @@ RRF（倒数排名融合）：
 """
 import jieba
 from rank_bm25 import BM25Okapi
-from src.vector_store import search_similar, get_all_chunks
+from src.vector_store import search_similar, get_all_chunks, collection_count
 from src.config import TOP_K_RETRIEVE, BM25_WEIGHT, VECTOR_WEIGHT
 
 
@@ -30,6 +30,32 @@ def _tokenize(text: str) -> list[str]:
     return list(jieba.cut(text))
 
 
+# --- BM25 索引缓存（模块级，跨实例共享）---
+# 之前每个 HybridRetriever 实例、每次 search 都全量重建 BM25 索引，
+# 知识库一大就 O(N)/query。现在按 kb_id 缓存，缓存键 = 当前 chunk 总数：
+#   · 向量库有增删时 count 变化 → 自动失效重建
+#   · count 从持久层（Chroma）读取，Streamlit / FastAPI 多进程共享 data 目录也能正确失效
+# 唯一边界：删 1 条 + 增 1 条导致 count 不变时可能用到旧索引，下次增删即自愈。
+_bm25_cache: dict[str, tuple[int, BM25Okapi | None, list[dict]]] = {}
+
+
+def _get_bm25(kb_id: str) -> tuple[BM25Okapi | None, list[dict]]:
+    """按 kb_id 取（BM25 索引, 全量 chunk），有增删时自动重建。"""
+    current_count = collection_count(kb_id)
+    cached = _bm25_cache.get(kb_id)
+    if cached and cached[0] == current_count:
+        return cached[1], cached[2]
+
+    chunks = get_all_chunks(kb_id)
+    if not chunks:
+        _bm25_cache[kb_id] = (current_count, None, [])
+        return None, []
+
+    bm25 = BM25Okapi([_tokenize(c["content"]) for c in chunks])
+    _bm25_cache[kb_id] = (current_count, bm25, chunks)
+    return bm25, chunks
+
+
 class HybridRetriever:
     """
     混合检索器，每个知识库一个实例。
@@ -41,31 +67,6 @@ class HybridRetriever:
 
     def __init__(self, kb_id: str):
         self.kb_id = kb_id
-        self.chunks: list[dict] = []      # 所有 chunk
-        self.bm25: BM25Okapi | None = None  # BM25 索引
-
-    def _build_bm25(self):
-        """构建 BM25 索引（从向量库里取出所有 chunk）"""
-        self.chunks = get_all_chunks(self.kb_id)
-        if not self.chunks:
-            self.bm25 = None
-            return
-        tokenized = [_tokenize(c["content"]) for c in self.chunks]
-        self.bm25 = BM25Okapi(tokenized)
-
-    def _bm25_search(self, query: str, top_k: int) -> list[tuple[int, float]]:
-        """
-        BM25 关键词检索
-        返回：[(chunk在self.chunks中的索引, 分数), ...]
-        """
-        if self.bm25 is None:
-            return []
-        tokenized = _tokenize(query)
-        scores = self.bm25.get_scores(tokenized)
-        # 取 top_k
-        indexed = list(enumerate(scores))
-        indexed.sort(key=lambda x: x[1], reverse=True)
-        return indexed[:top_k]
 
     def search(self, query: str, top_k: int = TOP_K_RETRIEVE) -> list[dict]:
         """
@@ -81,22 +82,24 @@ class HybridRetriever:
         for rank, r in enumerate(vector_results, start=1):
             r["vector_rank"] = rank
 
-        # --- BM25 检索 ---
-        self._build_bm25()
-        bm25_results = self._bm25_search(query, top_k=top_k * 2)
-        # 把 BM25 结果映射到 chunk 数据
+        # --- BM25 检索（索引带缓存，向量库有增删时自动重建）---
+        bm25, chunks = _get_bm25(self.kb_id)
         bm25_mapped = []
-        for rank, (idx, score) in enumerate(bm25_results, start=1):
-            chunk = self.chunks[idx]
-            bm25_mapped.append({
-                "content": chunk["content"],
-                "source": chunk["source"],
-                "page": chunk["page"],
-                "type": chunk.get("type", "text"),
-                "image": chunk.get("image"),
-                "bm25_rank": rank,
-                "bm25_score": float(score)
-            })
+        if bm25 is not None:
+            scores = bm25.get_scores(_tokenize(query))
+            indexed = list(enumerate(scores))
+            indexed.sort(key=lambda x: x[1], reverse=True)
+            for rank, (idx, score) in enumerate(indexed[:top_k * 2], start=1):
+                chunk = chunks[idx]
+                bm25_mapped.append({
+                    "content": chunk["content"],
+                    "source": chunk["source"],
+                    "page": chunk["page"],
+                    "type": chunk.get("type", "text"),
+                    "image": chunk.get("image"),
+                    "bm25_rank": rank,
+                    "bm25_score": float(score)
+                })
 
         # --- RRF 融合 ---
         # 用 dict 去重（同一内容可能两路都搜到），key = source + content[:50]

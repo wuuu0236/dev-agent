@@ -16,7 +16,7 @@ RAG 问答 Agent（Langfuse 版 · v4 API）
 """
 import sys
 
-from langfuse import observe
+from langfuse.decorators import observe
 from langfuse.openai import OpenAI as LangfuseOpenAI
 from openai import OpenAI as OpenAIClient
 
@@ -171,4 +171,6 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                 "type": c.get("type", "text"),
             })
 
-    return {"answer": answer, "sources": unique_sources, "query": query}
+    # contexts 一并返回：评估面板复用它做 LLM Judge，避免二次检索。
+    # 前端只读 answer / sources，多这个 key 不影响既有调用。
+    return {"answer": answer, "sources": unique_sources, "contexts": contexts, "query": query}
