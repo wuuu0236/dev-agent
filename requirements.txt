@@ -42,6 +42,7 @@ pandas>=2.0.0
 ragas>=0.4.0,<0.5
 
 # --- 可观测性 ---
-# 锁 <2.60：2.60+ 移除了 langfuse.callback.langchain，导入即崩
-langfuse>=2.50.0,<2.60.0
+# 锁 2.50.x：只依赖 @observe / callback.langchain，2.50 验证可用；
+# 不用 langfuse.openai（部分环境导入即崩 + 全局 patch openai 干扰 RAGAS）
+langfuse>=2.50.0,<2.51.0
 

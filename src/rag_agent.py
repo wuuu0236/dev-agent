@@ -2,8 +2,9 @@
 RAG 问答 Agent（Langfuse 版 · v4 API）
 
 主要能力：
-  1. LLM 客户端换成 langfuse.openai.OpenAI —— Token / 延迟自动上报（云端模式）。
-  2. rag_query / generate_answer 用 @observe 装饰，自动捕获输入输出。
+  1. rag_query / generate_answer 用 @observe 装饰，自动捕获输入输出、延迟、Token。
+  2. 注意：不用 langfuse.openai 客户端——它在部分环境（如 Python 3.14 + 新 openai）
+     导入即崩，且会全局 patch openai 客户端干扰 RAGAS 评测。观测统一走 @observe。
   3. **多模态 / 私有化扩展**：
      - 推理后端可切换：cloud（DeepSeek 等云端 API）| ollama（本地私有化、离线、数据不出域）。
      - 命中图片块时：若配置了本地视觉模型（Ollama minicpm-v 等），先由视觉模型"真看图"
@@ -17,8 +18,7 @@ RAG 问答 Agent（Langfuse 版 · v4 API）
 import sys
 
 from langfuse.decorators import observe
-from langfuse.openai import OpenAI as LangfuseOpenAI
-from openai import OpenAI as OpenAIClient
+from openai import OpenAI
 
 from src.config import (
     LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TEMPERATURE, TOP_K_RETRIEVE,
@@ -27,14 +27,14 @@ from src.config import (
 # 生产检索器：基于 Chroma + BM25 + RRF，按 kb_id 检索（与已部署版本一致）
 from src.hybrid_retriever import HybridRetriever
 
-# 云端客户端（Langfuse 自动上报）；构造不依赖 langfuse key，缺配置只是不上报
-_client = LangfuseOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+# 云端 DeepSeek 客户端（观测由 @observe 装饰器完成，不依赖 langfuse.openai）
+_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 # 本地 Ollama 客户端缓存（按 base_url）
 _ollama_clients = {}
 
 
-def _get_ollama_client(base_url: str) -> OpenAIClient:
+def _get_ollama_client(base_url: str) -> OpenAI:
     if base_url not in _ollama_clients:
         _ollama_clients[base_url] = OpenAIClient(
             api_key="ollama", base_url=base_url, timeout=120.0

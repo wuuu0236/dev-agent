@@ -35,8 +35,6 @@ from ragas.metrics import context_precision, context_recall, faithfulness, answe
 from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from src.config import EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, DATA_DIR
 from src.rag_agent import rag_query
-# 必须在 rag_agent（它会 import langfuse.openai）之后加载，修复 usage=None 崩溃
-import src.langfuse_compat  # noqa: E402,F401
 
 load_dotenv()
 
