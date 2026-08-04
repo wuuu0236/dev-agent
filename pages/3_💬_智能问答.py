@@ -3,7 +3,7 @@
 """
 import streamlit as st
 from src.database import list_kbs, get_kb_stats
-from src.rag_agent import rag_query
+from src.rag_agent import stream_rag_query
 from src.config import TOP_K_RETRIEVE
 
 st.set_page_config(page_title="智能问答 - DataLens", page_icon="💬")
@@ -67,28 +67,29 @@ if query := st.chat_input("输入你的问题..."):
         st.markdown(query)
     st.session_state.messages.append({"role": "user", "content": query})
 
-    # 显示 AI 回答
+    # 显示 AI 回答（流式：检索 → 打字机输出）
     with st.chat_message("assistant"):
-        with st.spinner("检索中..."):
-            result = rag_query(
-                kb_id, query, top_k=TOP_K_RETRIEVE,
-                backend=st.session_state.get("qa_backend", "cloud"),
-                vision_model=st.session_state.get("qa_vision", ""),
-            )
+        status = st.status("检索知识库...", expanded=False)
+        gen, sources, _contexts = stream_rag_query(
+            kb_id, query, top_k=TOP_K_RETRIEVE,
+            backend=st.session_state.get("qa_backend", "cloud"),
+            vision_model=st.session_state.get("qa_vision", ""),
+        )
+        status.update(label="生成回答...", state="running")
+        answer = st.write_stream(gen)
+        status.update(label="完成", state="complete")
 
-        st.markdown(result["answer"])
-
-        if result["sources"]:
+        if sources:
             with st.expander("📖 引用来源"):
-                for s in result["sources"]:
+                for s in sources:
                     page_info = f" — 第{s['page']}页" if s.get("page") else ""
                     badge = " 🖼️" if s.get("type") == "image" else ""
                     st.caption(f"• {s['source']}{page_info}{badge}")
 
     st.session_state.messages.append({
         "role": "assistant",
-        "content": result["answer"],
-        "sources": result["sources"]
+        "content": answer,
+        "sources": sources
     })
 
 # --- 清空按钮 ---

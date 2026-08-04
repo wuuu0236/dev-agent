@@ -16,12 +16,23 @@ from src.config import CHROMA_DIR, EMBEDDING_DIM
 from src.embeddings import embed_texts, embed_single
 
 
+_client = None  # 单例缓存（chromadb 1.x 里 PersistentClient 是工厂函数，不做类型注解）
+
+
 def _get_client() -> chromadb.PersistentClient:
-    """获取 Chroma 客户端（持久化存储）"""
-    return chromadb.PersistentClient(
-        path=str(CHROMA_DIR),
-        settings=Settings(anonymized_telemetry=False)
-    )
+    """获取 Chroma 客户端（进程内单例，只创建一次）。
+
+    之前每次调用都新建 PersistentClient——chroma 的共享系统在释放旧客户端时
+    偶发崩溃（RustBindingsAPI.stop 的 `del self.bindings`）。正确用法是进程内
+    单例，Streamlit 多页面重跑也不会重复创建。
+    """
+    global _client
+    if _client is None:
+        _client = chromadb.PersistentClient(
+            path=str(CHROMA_DIR),
+            settings=Settings(anonymized_telemetry=False)
+        )
+    return _client
 
 
 def _collection_name(kb_id: str) -> str:

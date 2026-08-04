@@ -82,13 +82,16 @@ def _vision_ground(query: str, image_paths: list[str], vision_model: str, base_u
         return ""
 
 
-@observe(name="rag.generate_answer", capture_input=True, capture_output=True)
-def generate_answer(query: str, contexts: list[dict],
-                    backend: str | None = None,
-                    vision_model: str | None = None,
-                    base_url: str | None = None,
-                    llm_model: str | None = None) -> str:
-    """基于检索到的上下文生成答案。支持本地视觉模型接地。"""
+def _prepare_generation(query: str, contexts: list[dict],
+                        backend: str | None = None,
+                        vision_model: str | None = None,
+                        base_url: str | None = None,
+                        llm_model: str | None = None) -> tuple:
+    """组装生成请求：视觉接地 + 上下文 + 选客户端。
+
+    generate_answer（非流式）与 stream_generate_answer（流式）共用，
+    返回 (client, model, messages)。
+    """
     backend = backend or LLM_BACKEND
     vision_model = vision_model if vision_model is not None else OLLAMA_VISION_MODEL
     base_url = base_url or OLLAMA_BASE_URL
@@ -126,17 +129,46 @@ def generate_answer(query: str, contexts: list[dict],
         client = _client
         model = llm_model or LLM_MODEL
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=LLM_TEMPERATURE,
-        max_tokens=1024,
-    )
+    return client, model, [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
 
+
+@observe(name="rag.generate_answer", capture_input=True, capture_output=True)
+def generate_answer(query: str, contexts: list[dict],
+                    backend: str | None = None,
+                    vision_model: str | None = None,
+                    base_url: str | None = None,
+                    llm_model: str | None = None) -> str:
+    """基于检索到的上下文生成答案。支持本地视觉模型接地。"""
+    client, model, messages = _prepare_generation(
+        query, contexts, backend=backend, vision_model=vision_model,
+        base_url=base_url, llm_model=llm_model,
+    )
+    response = client.chat.completions.create(
+        model=model, messages=messages, temperature=LLM_TEMPERATURE, max_tokens=1024,
+    )
     return response.choices[0].message.content
+
+
+def stream_generate_answer(query: str, contexts: list[dict],
+                           backend: str | None = None,
+                           vision_model: str | None = None,
+                           base_url: str | None = None,
+                           llm_model: str | None = None):
+    """流式生成答案，逐块 yield（供网页打字机效果）。"""
+    client, model, messages = _prepare_generation(
+        query, contexts, backend=backend, vision_model=vision_model,
+        base_url=base_url, llm_model=llm_model,
+    )
+    response = client.chat.completions.create(
+        model=model, messages=messages, temperature=LLM_TEMPERATURE,
+        max_tokens=1024, stream=True,
+    )
+    for chunk in response:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 
 @observe(name="rag.query", capture_input=True, capture_output=True)
@@ -174,3 +206,36 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # contexts 一并返回：评估面板复用它做 LLM Judge，避免二次检索。
     # 前端只读 answer / sources，多这个 key 不影响既有调用。
     return {"answer": answer, "sources": unique_sources, "contexts": contexts, "query": query}
+
+
+def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
+                     backend: str | None = None,
+                     vision_model: str | None = None):
+    """流式版 RAG 查询。返回 (答案生成器, sources, contexts)。
+
+    网页用 st.write_stream(gen) 渲染打字机效果；sources 用于展示引用来源。
+    rag_query（非流式）保留给评估面板使用。
+    """
+    retriever = HybridRetriever(kb_id)
+    contexts = retriever.search(query, top_k=top_k)
+
+    if not contexts:
+        return (iter(["知识库中没有找到相关内容，请先上传文档。"]), [], [])
+
+    # 去重引用来源（与 rag_query 一致）
+    seen = set()
+    unique_sources = []
+    for c in contexts:
+        key = c["source"]
+        if key not in seen:
+            seen.add(key)
+            unique_sources.append({
+                "source": c["source"],
+                "page": c.get("page", 0),
+                "type": c.get("type", "text"),
+            })
+
+    def gen():
+        yield from stream_generate_answer(query, contexts, backend=backend, vision_model=vision_model)
+
+    return gen(), unique_sources, contexts
