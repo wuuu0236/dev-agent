@@ -30,7 +30,17 @@ from src.config import (
 from src.hybrid_retriever import HybridRetriever
 
 # 云端 DeepSeek 客户端（观测由 @observe 装饰器完成，不依赖 langfuse.openai）
-_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+# 惰性创建：模块 import 不造客户端——没配 key 的环境（CI / 测试）也能 import，
+# 只有真正调用 LLM 时才创建并校验凭据。
+_client = None
+
+
+def _get_client() -> OpenAI:
+    """取云端 DeepSeek 客户端，首次调用时创建（惰性单例）。"""
+    global _client
+    if _client is None:
+        _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    return _client
 
 # 本地 Ollama 客户端缓存（按 base_url）
 _ollama_clients = {}
@@ -132,7 +142,7 @@ def _prepare_generation(query: str, contexts: list[dict],
         client = _get_ollama_client(base_url)
         model = llm_model or OLLAMA_LLM_MODEL
     else:
-        client = _client
+        client = _get_client()
         model = llm_model or LLM_MODEL
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]

@@ -61,12 +61,24 @@ class AgentState(TypedDict):
 
 # 用 LangChain 的 ChatOpenAI（原生吃 LangChain 消息，不再需要手动格式转换）。
 # 正因为是 LangChain 聊天模型，graph.stream(stream_mode="messages") 才能按 token 真流式。
-llm = ChatOpenAI(
-    model=LLM_MODEL,
-    api_key=LLM_API_KEY,
-    base_url=LLM_BASE_URL,
-    temperature=LLM_TEMPERATURE,
-)
+# 惰性创建：模块 import 不造模型——没配 key 的环境（CI / 测试）也能 import，
+# 只有真正跑图调 LLM 时才创建并校验凭据。
+_llm = None
+_llm_with_tools = None
+
+
+def _get_llm():
+    """取绑好工具的 LLM 模型，首次调用时创建（惰性单例）。"""
+    global _llm, _llm_with_tools
+    if _llm is None:
+        _llm = ChatOpenAI(
+            model=LLM_MODEL,
+            api_key=LLM_API_KEY,
+            base_url=LLM_BASE_URL,
+            temperature=LLM_TEMPERATURE,
+        )
+        _llm_with_tools = _llm.bind_tools(TOOLS)
+    return _llm_with_tools
 
 # 工具定义：文件工具 + 知识库（search_knowledge 等 RAG 工具已启用）
 TOOLS = [
@@ -165,9 +177,7 @@ TOOL_MAP = {
     "add_knowledge": add_knowledge,
     "load_file_to_knowledge": load_file_to_knowledge,
 }
-
-# 绑好工具的模型：invoke(LangChain 消息) → AIMessage，tool_calls 直接是 LangChain 格式
-llm_with_tools = llm.bind_tools(TOOLS)
+# 绑好工具的模型用 _get_llm() 惰性取：invoke(LangChain 消息) → AIMessage，tool_calls 直接是 LangChain 格式
 
 
 # ── 格式转换说明 ────────────────────────────────────────
@@ -191,7 +201,7 @@ def call_model(state: AgentState) -> dict:
 
     # 绑了工具的 ChatOpenAI：直接 invoke LangChain 消息，
     # 返回的 AIMessage 自带 LangChain 格式的 tool_calls（id / name / args）
-    ai_msg = llm_with_tools.invoke(state["messages"])
+    ai_msg = _get_llm().invoke(state["messages"])
     return {
         "messages": [ai_msg],
         "step_count": state["step_count"] + 1,  # 每次调 AI 就 +1（= while 循环的 step += 1）
