@@ -13,7 +13,9 @@ RRF（倒数排名融合）：
 """
 import jieba
 from rank_bm25 import BM25Okapi
-from src.vector_store import search_similar, get_all_chunks, collection_count
+# 注意：不在这里 import vector_store（chromadb 是重型原生依赖）。
+# 只有真正查库时才 import（惰性）——让分词/检索逻辑本身不依赖 chromadb，
+# 也保证 CI 冒烟测试无需安装 chromadb。
 from src.config import TOP_K_RETRIEVE, BM25_WEIGHT, VECTOR_WEIGHT
 
 
@@ -41,6 +43,7 @@ _bm25_cache: dict[str, tuple[int, BM25Okapi | None, list[dict]]] = {}
 
 def _get_bm25(kb_id: str) -> tuple[BM25Okapi | None, list[dict]]:
     """按 kb_id 取（BM25 索引, 全量 chunk），有增删时自动重建。"""
+    from src.vector_store import collection_count, get_all_chunks  # 惰性：只有查库才拖 chromadb
     current_count = collection_count(kb_id)
     cached = _bm25_cache.get(kb_id)
     if cached and cached[0] == current_count:
@@ -77,6 +80,7 @@ class HybridRetriever:
         4. 返回融合后的 top_k 结果
         """
         # --- 向量检索 ---
+        from src.vector_store import search_similar  # 惰性：只有真查库才拖 chromadb
         vector_results = search_similar(self.kb_id, query, top_k=top_k * 2)
         # 给每个结果标上向量检索的排名（1 = 最相关）
         for rank, r in enumerate(vector_results, start=1):
