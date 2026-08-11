@@ -1,0 +1,15 @@
+# 冒烟测试依赖（CI 用）——只装跑核心逻辑测试需要的包。
+# 刻意不装 requirements.txt 里的重型组件（RapidOCR / RAGAS 评估 / Streamlit 前端），
+# 让 CI 快而稳、失败点少。完整运行环境仍用 requirements.txt 本地安装。
+langgraph>=0.2.0,<1.0
+langchain>=0.3.0,<1.0
+langchain-core>=0.3.0,<1.0
+langchain-openai>=0.2.0,<1.0
+openai>=1.0.0
+python-dotenv>=1.0.0
+chromadb>=0.4.0
+numpy>=1.24.0
+rank-bm25>=0.2.2
+jieba>=0.42.0
+langfuse>=2.50.0,<2.51.0
+pytest>=7.0

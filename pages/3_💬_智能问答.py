@@ -3,7 +3,7 @@
 """
 import streamlit as st
 from src.database import list_kbs, get_kb_stats
-from src.rag_agent import stream_rag_query
+from src.rag_agent import stream_rag_query, extract_cited_sources
 from src.config import TOP_K_RETRIEVE
 
 st.set_page_config(page_title="智能问答 - DataLens", page_icon="💬")
@@ -70,18 +70,28 @@ if query := st.chat_input("输入你的问题..."):
     # 显示 AI 回答（流式：检索 → 打字机输出）
     with st.chat_message("assistant"):
         status = st.status("检索知识库...", expanded=False)
-        gen, sources, _contexts = stream_rag_query(
+        # 注入最近对话历史（除当前这条），让"那第二点呢"这类追问有上下文
+        history = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.messages[:-1] if m.get("content")
+        ]
+        gen, sources, contexts = stream_rag_query(
             kb_id, query, top_k=TOP_K_RETRIEVE,
             backend=st.session_state.get("qa_backend", "cloud"),
             vision_model=st.session_state.get("qa_vision", ""),
+            history=history,
         )
         status.update(label="生成回答...", state="running")
         answer = st.write_stream(gen)
         status.update(label="完成", state="complete")
 
-        if sources:
+        # 引用映射：回答里的 [n] → 真实来源（防 LLM 编造文件名/页码）；
+        # 回答没标引用时回退到全部检索来源
+        cited = extract_cited_sources(answer, contexts) if contexts else []
+        display_sources = cited or sources
+        if display_sources:
             with st.expander("📖 引用来源"):
-                for s in sources:
+                for s in display_sources:
                     page_info = f" — 第{s['page']}页" if s.get("page") else ""
                     badge = " 🖼️" if s.get("type") == "image" else ""
                     st.caption(f"• {s['source']}{page_info}{badge}")
@@ -89,7 +99,7 @@ if query := st.chat_input("输入你的问题..."):
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
-        "sources": sources
+        "sources": display_sources
     })
 
 # --- 清空按钮 ---

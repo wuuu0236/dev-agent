@@ -6,6 +6,11 @@ v2 改动：/chat 接口从 while 循环换成 LangGraph 图
   · 现在：server.py 只管接收请求 → 调 graph → 返回结果
   · Agent 的核心逻辑全在 dev_agent_langgraph.py 的图里
 
+v3 改动：多轮历史 + 真流式
+  · ChatRequest 支持 history 字段，多轮追问有上下文（与 RAG 问答路径对齐）
+  · /chat/stream 改真流式：stream_agent 用 graph.stream(stream_mode="messages")
+    按 token 吐最终答案，不再是「跑完再切块」的假流式
+
 跑起来后：
   浏览器访问 http://localhost:8000/docs → 自动生成的 API 文档
   POST http://localhost:8000/chat → 发问题，拿回答
@@ -13,7 +18,6 @@ v2 改动：/chat 接口从 while 循环换成 LangGraph 图
 
 import os
 import sys
-import asyncio
 import logging
 import io
 from datetime import datetime
@@ -24,8 +28,8 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# ⭐ 统一入口：跑 LangGraph 图 + 提取最终答案，都在 run_agent 里
-from src.agent.dev_agent_langgraph import run_agent
+# ⭐ 统一入口：跑 LangGraph 图 + 提取最终答案，都在 run_agent / stream_agent 里
+from src.agent.dev_agent_langgraph import run_agent, stream_agent
 
 load_dotenv()
 
@@ -60,6 +64,10 @@ class ChatRequest(BaseModel):
     work_dir: str = Field(
         default="C:/Users/24162/Desktop",
         description="工作目录，Agent 只能访问该目录下的文件",
+    )
+    history: list[dict] = Field(
+        default_factory=list,
+        description="此条问题之前的对话历史（不含当前问题），格式 [{role, content}]，最近的在末尾；用于多轮追问",
     )
 
 
@@ -116,7 +124,8 @@ def chat(request: ChatRequest):
     """
     logger.info(f"收到问题: {request.question[:50]}...")
 
-    result = run_agent(request.question, work_dir=request.work_dir, session_id="api")
+    result = run_agent(request.question, work_dir=request.work_dir,
+                       session_id="api", history=request.history)
 
     return ChatResponse(
         answer=result["answer"],
@@ -128,25 +137,20 @@ def chat(request: ChatRequest):
 @app.post(
     "/chat/stream",
     summary="发送问题（流式版）",
-    description="和 /chat 一样，但最终答案会分块流式返回（打字机效果）。",
+    description="和 /chat 一样，但最终答案按 token 流式返回（打字机效果）。",
 )
-async def chat_stream(request: ChatRequest):
+def chat_stream(request: ChatRequest):
     """
-    向 Agent 提问，答案流式输出
+    向 Agent 提问，答案按 token 流式输出
 
-    图只跑一次（和 /chat 开销相同），拿到最终答案后按小块吐给前端。
-    旧版会在图跑完后【再调一次 LLM 流式接口】——费用翻倍，且两次生成的
-    答案可能不一致。现在答案以 /chat 为准，分块输出只负责「打字机效果」。
+    stream_agent 用 graph.stream(stream_mode="messages") 拿到模型生成的每个
+    token——同一个图、同一个 LLM 调用，边生成边吐，是**真流式**。
+    工具循环的中间消息（content 为空）被跳过，只有最终答案的文字流出来。
     """
-    async def generate():
-        result = run_agent(request.question, work_dir=request.work_dir, session_id="api-stream")
-        answer = result["answer"]
-
-        # 分块输出：块太大等于一次返回，块太小切碎中文读感差
-        chunk_size = 8
-        for i in range(0, len(answer), chunk_size):
-            yield answer[i:i + chunk_size]
-            await asyncio.sleep(0.03)
+    def generate():
+        for chunk in stream_agent(request.question, work_dir=request.work_dir,
+                                  session_id="api-stream", history=request.history):
+            yield chunk
 
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 

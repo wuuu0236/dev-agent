@@ -1,0 +1,30 @@
+# CI：每次 push 自动跑核心逻辑的确定性测试（不调 LLM，无需任何密钥）。
+#
+# 设计取舍：
+#   · 装最小依赖（requirements-dev.txt）而非完整 requirements.txt——
+#     重型组件（OCR/评估/前端）留给本地，CI 快而稳。
+#   · 只测「不调 LLM、不碰数据库」的纯逻辑，密钥永远不进 CI。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装测试依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 跑冒烟测试
+        run: python -m pytest tests/ -v

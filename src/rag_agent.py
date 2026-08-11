@@ -15,6 +15,7 @@ RAG 问答 Agent（Langfuse 版 · v4 API）
   rag_query(kb_id, query, top_k, backend=None, vision_model=None) -> {answer, sources, query}
   backend / vision_model 不传则读 config，保证已部署的云端 Demo 行为不变。
 """
+import re
 import sys
 
 from langfuse.decorators import observe
@@ -23,6 +24,7 @@ from openai import OpenAI
 from src.config import (
     LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TEMPERATURE, TOP_K_RETRIEVE,
     LLM_BACKEND, OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_VISION_MODEL,
+    RAG_HISTORY_TURNS,
 )
 # 生产检索器：基于 Chroma + BM25 + RRF，按 kb_id 检索（与已部署版本一致）
 from src.hybrid_retriever import HybridRetriever
@@ -48,7 +50,7 @@ SYSTEM_PROMPT = """你是一个基于知识库的问答助手。用户会提供�
 1. 只根据参考文档回答，不要编造文档中没有的信息。
 2. 回答要简洁、准确，用中文。
 3. 如果参考文档中没有相关信息，直接说「知识库中未找到相关信息」。
-4. 回答末尾标注引用来源，格式：[来源: 文件名, 第X页]
+4. 引用参考文档时，在引用内容后标注来源序号，格式：[1]、[2]……只使用参考文档中标注的序号，不要编造文件名或页码。
 5. 如果问题不涉及文档中的具体内容，可以根据常识简短回答。"""
 
 
@@ -86,11 +88,15 @@ def _prepare_generation(query: str, contexts: list[dict],
                         backend: str | None = None,
                         vision_model: str | None = None,
                         base_url: str | None = None,
-                        llm_model: str | None = None) -> tuple:
-    """组装生成请求：视觉接地 + 上下文 + 选客户端。
+                        llm_model: str | None = None,
+                        history: list[dict] | None = None) -> tuple:
+    """组装生成请求：视觉接地 + 上下文 + 最近对话历史 + 选客户端。
 
     generate_answer（非流式）与 stream_generate_answer（流式）共用，
     返回 (client, model, messages)。
+
+    history: [{role, content}]，最近的对话轮次。注入 system 与当前问题之间，
+    让「那第二点呢」「具体怎么配置」这类追问有上下文（此前只渲染不注入）。
     """
     backend = backend or LLM_BACKEND
     vision_model = vision_model if vision_model is not None else OLLAMA_VISION_MODEL
@@ -129,10 +135,18 @@ def _prepare_generation(query: str, contexts: list[dict],
         client = _client
         model = llm_model or LLM_MODEL
 
-    return client, model, [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
-    ]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history:
+        # 注入最近对话轮次（system + 历史 + 当前问题），保留追问上下文；
+        # 只取 user/assistant 纯文本，丢弃 sources 等展示性元数据
+        for h in history[-RAG_HISTORY_TURNS:]:
+            role = h.get("role")
+            content = (h.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_message})
+
+    return client, model, messages
 
 
 @observe(name="rag.generate_answer", capture_input=True, capture_output=True)
@@ -140,11 +154,12 @@ def generate_answer(query: str, contexts: list[dict],
                     backend: str | None = None,
                     vision_model: str | None = None,
                     base_url: str | None = None,
-                    llm_model: str | None = None) -> str:
-    """基于检索到的上下文生成答案。支持本地视觉模型接地。"""
+                    llm_model: str | None = None,
+                    history: list[dict] | None = None) -> str:
+    """基于检索到的上下文生成答案。支持本地视觉模型接地与最近对话历史。"""
     client, model, messages = _prepare_generation(
         query, contexts, backend=backend, vision_model=vision_model,
-        base_url=base_url, llm_model=llm_model,
+        base_url=base_url, llm_model=llm_model, history=history,
     )
     response = client.chat.completions.create(
         model=model, messages=messages, temperature=LLM_TEMPERATURE, max_tokens=1024,
@@ -156,11 +171,12 @@ def stream_generate_answer(query: str, contexts: list[dict],
                            backend: str | None = None,
                            vision_model: str | None = None,
                            base_url: str | None = None,
-                           llm_model: str | None = None):
+                           llm_model: str | None = None,
+                           history: list[dict] | None = None):
     """流式生成答案，逐块 yield（供网页打字机效果）。"""
     client, model, messages = _prepare_generation(
         query, contexts, backend=backend, vision_model=vision_model,
-        base_url=base_url, llm_model=llm_model,
+        base_url=base_url, llm_model=llm_model, history=history,
     )
     response = client.chat.completions.create(
         model=model, messages=messages, temperature=LLM_TEMPERATURE,
@@ -174,7 +190,8 @@ def stream_generate_answer(query: str, contexts: list[dict],
 @observe(name="rag.query", capture_input=True, capture_output=True)
 def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
               backend: str | None = None,
-              vision_model: str | None = None) -> dict:
+              vision_model: str | None = None,
+              history: list[dict] | None = None) -> dict:
     """完整的 RAG 查询流程：检索 + 生成。backend/vision_model 不传则读 config。"""
     # 1. 检索
     retriever = HybridRetriever(kb_id)
@@ -187,8 +204,9 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             "query": query,
         }
 
-    # 2. 生成
-    answer = generate_answer(query, contexts, backend=backend, vision_model=vision_model)
+    # 2. 生成（带最近对话历史，多轮追问有上下文）
+    answer = generate_answer(query, contexts, backend=backend, vision_model=vision_model,
+                             history=history)
 
     # 3. 去重引用来源（图片块也带上类型标记，便于前端展示）
     seen = set()
@@ -210,11 +228,12 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
 
 def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                      backend: str | None = None,
-                     vision_model: str | None = None):
+                     vision_model: str | None = None,
+                     history: list[dict] | None = None):
     """流式版 RAG 查询。返回 (答案生成器, sources, contexts)。
 
     网页用 st.write_stream(gen) 渲染打字机效果；sources 用于展示引用来源。
-    rag_query（非流式）保留给评估面板使用。
+    rag_query（非流式）保留给评估面板使用。history 为最近对话轮次（多轮追问）。
     """
     retriever = HybridRetriever(kb_id)
     contexts = retriever.search(query, top_k=top_k)
@@ -236,6 +255,31 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             })
 
     def gen():
-        yield from stream_generate_answer(query, contexts, backend=backend, vision_model=vision_model)
+        yield from stream_generate_answer(query, contexts, backend=backend, vision_model=vision_model,
+                                          history=history)
 
     return gen(), unique_sources, contexts
+
+
+def extract_cited_sources(answer: str, contexts: list[dict]) -> list[dict]:
+    """解析回答中的 [n] 引用序号，映射到真实检索来源（按出现顺序去重）。
+
+    防 LLM 编造：文件名/页码不再由模型生成，只让模型给序号，
+    由本函数映射回检索到的真实 sources。越界/异常序号自动忽略。
+    """
+    if not contexts:
+        return []
+    seen, out = set(), []
+    for n in re.findall(r"\[(\d+)\]", answer or ""):
+        i = int(n) - 1
+        if 0 <= i < len(contexts):
+            c = contexts[i]
+            key = c.get("source")
+            if key and key not in seen:
+                seen.add(key)
+                out.append({
+                    "source": c["source"],
+                    "page": c.get("page", 0),
+                    "type": c.get("type", "text"),
+                })
+    return out

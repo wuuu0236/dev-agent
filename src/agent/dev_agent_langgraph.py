@@ -12,19 +12,19 @@ dev_agent_langgraph.py —— LangGraph 版 Agent
 
 import os
 import sys
-import json
 import logging
 from typing import TypedDict, Annotated, Literal
 
-from openai import OpenAI
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
+from langchain_openai import ChatOpenAI
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.tools.file_tools import list_files, read_file, search_in_files
 from src.hybrid_retriever import search_knowledge, add_knowledge, load_file_to_knowledge
+from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TEMPERATURE, RAG_HISTORY_TURNS
 
 load_dotenv()
 
@@ -59,12 +59,16 @@ class AgentState(TypedDict):
 # 第 2 步：定义节点
 # ================================================================
 
-client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com",
+# 用 LangChain 的 ChatOpenAI（原生吃 LangChain 消息，不再需要手动格式转换）。
+# 正因为是 LangChain 聊天模型，graph.stream(stream_mode="messages") 才能按 token 真流式。
+llm = ChatOpenAI(
+    model=LLM_MODEL,
+    api_key=LLM_API_KEY,
+    base_url=LLM_BASE_URL,
+    temperature=LLM_TEMPERATURE,
 )
 
-# 工具定义（暂时只用文件工具，RAG 先注释）
+# 工具定义：文件工具 + 知识库（search_knowledge 等 RAG 工具已启用）
 TOOLS = [
     {
         "type": "function",
@@ -162,44 +166,15 @@ TOOL_MAP = {
     "load_file_to_knowledge": load_file_to_knowledge,
 }
 
+# 绑好工具的模型：invoke(LangChain 消息) → AIMessage，tool_calls 直接是 LangChain 格式
+llm_with_tools = llm.bind_tools(TOOLS)
 
-# ── 格式转换层 ──────────────────────────────────────────
-# LangChain 消息  ←→  OpenAI API 格式
-# 两边字段名和值都不一样，需要翻译
 
-def _langchain_to_openai(messages: list) -> list:
-    """LangChain 消息 → OpenAI API 格式"""
-    TYPE_MAP = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
-
-    openai_msgs = []
-    for msg in messages:
-        d = msg.model_dump()
-        lc_type = d.get("type", "")
-        role = TYPE_MAP.get(lc_type, lc_type)
-        content = d.get("content", "")
-
-        converted = {"role": role, "content": content}
-
-        # AI 消息里的 tool_calls：LC 格式 → OpenAI 格式
-        if "tool_calls" in d and d["tool_calls"]:
-            openai_tool_calls = []
-            for tc in d["tool_calls"]:
-                openai_tool_calls.append({
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc["args"], ensure_ascii=False),
-                    },
-                })
-            converted["tool_calls"] = openai_tool_calls
-
-        # ToolMessage 需要 tool_call_id，AI 才知道对应哪个工具调用
-        if lc_type == "tool" and "tool_call_id" in d:
-            converted["tool_call_id"] = d["tool_call_id"]
-
-        openai_msgs.append(converted)
-    return openai_msgs
+# ── 格式转换说明 ────────────────────────────────────────
+# 旧版（v3）：call_model 用裸 OpenAI 客户端，需要手动把 LangChain 消息
+#   翻译成 OpenAI API 格式（曾有一个 _langchain_to_openai 转换层）。
+# 现在：直接用 LangChain 的 ChatOpenAI 模型，它原生接受 LangChain 消息，
+#   tool_calls 也直接返回 LangChain 格式——转换层删掉，少一层出错面。
 
 
 # ── 节点函数 ────────────────────────────────────────────
@@ -208,37 +183,15 @@ def call_model(state: AgentState) -> dict:
     """
     节点 1：调用 AI
     ──────────────
-    ① 把 LangChain 消息转成 OpenAI 格式
-    ② 调 DeepSeek API
-    ③ 把 OpenAI 回复转回 LangChain 格式
+    绑了工具的 ChatOpenAI 直接 invoke LangChain 消息，返回 AIMessage。
 
     对应 while 循环：response = client.chat.completions.create(...)
     """
     logger.info(f"节点 call_model：调用 AI（第 {state['step_count']} 步）...")
 
-    openai_messages = _langchain_to_openai(state["messages"])
-
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=openai_messages,
-        tools=TOOLS,
-        tool_choice="auto",
-    )
-
-    from langchain_core.messages import AIMessage
-    msg = response.choices[0].message
-
-    # tool_calls 格式转换：OpenAI → LangChain
-    lc_tool_calls = []
-    if msg.tool_calls:
-        for tc in msg.tool_calls:
-            lc_tool_calls.append({
-                "id": tc.id,
-                "name": tc.function.name,
-                "args": json.loads(tc.function.arguments),
-            })
-
-    ai_msg = AIMessage(content=msg.content or "", tool_calls=lc_tool_calls)
+    # 绑了工具的 ChatOpenAI：直接 invoke LangChain 消息，
+    # 返回的 AIMessage 自带 LangChain 格式的 tool_calls（id / name / args）
+    ai_msg = llm_with_tools.invoke(state["messages"])
     return {
         "messages": [ai_msg],
         "step_count": state["step_count"] + 1,  # 每次调 AI 就 +1（= while 循环的 step += 1）
@@ -335,25 +288,50 @@ graph = workflow.compile()
 # 第 5 步：运行
 # ================================================================
 
+SYSTEM_PROMPT = """你是开发助手 Agent，当前工作目录: {work_dir}。你可以调用工具完成文件操作，也可以查询知识库回答问题。
+
+规则：
+1. 需要文件/工具操作时，先调用对应工具再回答；工具执行失败要如实说明，不要假装成功。
+2. 查询知识库（search_knowledge）时，工具结果会自带 [n] 来源标注。引用时沿用这些序号，格式 [n]，不要编造文件名或页码。
+3. 用中文简洁回答。"""
+
+
+def _build_initial_state(question: str, work_dir: str,
+                         history: list[dict] | None = None) -> dict:
+    """组装图的初始状态：system + 最近对话历史 + 当前问题。
+
+    history 约定：此条问题之前的对话，[{role, content}]，最近的在列表末尾；
+    和 RAG 问答路径一致（网页注入 messages[:-1]）。只取最近 RAG_HISTORY_TURNS 轮，
+    让「那第二点呢」「具体怎么配置」这类追问有上下文。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+
+    messages = [SystemMessage(content=SYSTEM_PROMPT.format(work_dir=work_dir))]
+    if history:
+        for h in history[-RAG_HISTORY_TURNS:]:
+            role = h.get("role")
+            content = (h.get("content") or "").strip()
+            if role == "user" and content:
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant" and content:
+                messages.append(AIMessage(content=content))
+    messages.append(HumanMessage(content=question))
+    return {"messages": messages, "step_count": 0}
+
+
 def run_agent(question: str, work_dir: str = "C:/Users/24162/Desktop",
-              session_id: str = "api") -> dict:
+              session_id: str = "api",
+              history: list[dict] | None = None) -> dict:
     """
     运行 LangGraph Agent，返回 {"answer": str, "steps": int}。
 
     「跑图 → 提取最终答案」只在这里做一遍：
-      · API 的 /chat、/chat/stream 走这里
+      · API 的 /chat 走这里
       · CLI 交互走这里
-    避免最终答案提取逻辑散落在多个文件里（每处还容易改漏）。
+    /chat/stream 走 stream_agent（同一个图，按 token 吐）。
+    history：此条问题之前的对话，[{role, content}]，多轮追问有上下文。
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    initial_state = {
-        "messages": [
-            SystemMessage(content=f"你是开发助手 Agent。当前工作目录: {work_dir}"),
-            HumanMessage(content=question),
-        ],
-        "step_count": 0,
-    }
+    initial_state = _build_initial_state(question, work_dir, history)
 
     logger.info(f"收到问题: {question[:50]}...")
 
@@ -386,6 +364,37 @@ def run_agent(question: str, work_dir: str = "C:/Users/24162/Desktop",
     }
 
 
+def stream_agent(question: str, work_dir: str = "C:/Users/24162/Desktop",
+                 session_id: str = "api-stream",
+                 history: list[dict] | None = None):
+    """流式版 run_agent：同一个图、同一个 LLM 调用，按 token 吐最终答案。
+
+    关键在 call_model 用了 LangChain 聊天模型，配合
+    graph.stream(stream_mode=["updates", "messages"]) 能拿到每个 token：
+      · updates 模式 → 每个节点跑完的结果（这里忽略）
+      · messages 模式 → (AIMessageChunk, metadata)，chunk.content 就是新 token
+    工具调用的中间消息 content 为空，自动跳过——只有最终答案的文字流出来，
+    所以这是真流式，不是「跑完再切块」（旧版假流式，还白等一整轮）。
+    """
+    initial_state = _build_initial_state(question, work_dir, history)
+
+    logger.info(f"收到问题（流式）: {question[:50]}...")
+
+    stream_config: dict = {
+        "metadata": {"session_id": session_id, "user_question": question[:80]},
+        "run_name": "dev-agent-langgraph-stream",
+    }
+    if langfuse_handler is not None:
+        stream_config["callbacks"] = [langfuse_handler]
+
+    for mode, data in graph.stream(initial_state, config=stream_config,
+                                   stream_mode=["updates", "messages"]):
+        if mode == "messages":
+            message_chunk, _meta = data
+            if message_chunk.content:
+                yield message_chunk.content
+
+
 # ================================================================
 # 入口
 # ================================================================
@@ -395,7 +404,7 @@ if __name__ == "__main__":
     print("[LangGraph] 开发助手 Agent")
     print("=" * 50)
     print("和 v3 功能一样，但用 StateGraph 代替 while 循环")
-    print("当前工具: list_files | read_file | search_in_files")
+    print("当前工具: list_files | read_file | search_in_files | search_knowledge")
     print("输入 'exit' 退出")
     print("=" * 50)
 

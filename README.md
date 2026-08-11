@@ -49,6 +49,17 @@ flowchart LR
 
 ---
 
+## 🧭 两条入口，一个大脑（分工约定）
+
+| 入口 | 定位 | 能力 |
+|------|------|------|
+| **Web 智能问答**（`pages/3_💬_智能问答.py`） | 知识库问答（纯 RAG，快路径） | 快、带引用来源、6 轮追问上下文 |
+| **HTTP API**（`/chat`、`/chat/stream`） | 文件操作 Agent（LangGraph 工具循环，慢路径） | 文件工具 + 顺手查知识库；历史 / 流式与 RAG 对齐 |
+
+关键原则：**知识库问答走 RAG，文件/工具操作走 Agent**，各司其职——而不是把 RAG 也塞进 ReAct 循环，那只会让问答变慢、引用变难。两条路径共用 `HybridRetriever`（检索结果一致），都支持最近 6 轮对话注入（多轮追问不丢上下文）。`/chat/stream` 是**真流式**（按 token 吐），不是跑完再切块的假流式。
+
+---
+
 ## 🚀 快速开始
 
 ### 方式一：Web 前端（推荐演示用）
@@ -81,9 +92,22 @@ docker compose up
 ## 🔌 API 使用
 
 ```bash
+# 单轮提问
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"question": "列出桌面的文件", "work_dir": "/app/host-desktop"}'
+
+# 多轮追问：把之前的对话放进 history（不含当前问题，最近的在末尾）
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "那第二点呢", "work_dir": "/app/host-desktop",
+       "history": [{"role": "user", "content": "混合检索有什么好处"},
+                   {"role": "assistant", "content": "混合检索结合了关键词与语义..."}]}'
+
+# 流式：答案按 token 边生成边返回（打字机效果）
+curl -N -X POST http://localhost:8000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question": "读取 111.txt 的内容"}'
 ```
 
 ---

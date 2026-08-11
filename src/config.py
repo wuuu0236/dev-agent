@@ -61,6 +61,7 @@ CHUNK_OVERLAP = 50     # 相邻 chunk 重叠的字符数
 
 # --- 检索配置 ---
 TOP_K_RETRIEVE = 5     # 检索返回的文档数
+RAG_HISTORY_TURNS = 6  # 注入的最近对话条数（按消息条数切，非严格"轮"；Web 与 API 两条路径一致）
 BM25_WEIGHT = 0     # RRF 融合中 BM25 的权重（当前纯向量，经 A/B 测试该场景下纯向量优于混合检索）
 VECTOR_WEIGHT = 1   # RRF 融合中向量检索的权重（调回 BM25_WEIGHT=1 即可恢复混合检索）
 
