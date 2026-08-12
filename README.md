@@ -68,6 +68,7 @@ Web 问答路径还带**语义缓存**（`src/query_cache.py`）：无历史的�
 ### 方式一：Web 前端（推荐演示用）
 
 ```bash
+conda activate dev-agent   # 推荐用项目独立环境（Python 3.11；rapidocr 在 3.13 装不上）
 pip install -r requirements.txt
 cp .env.example .env    # 填入你的 DEEPSEEK_API_KEY
 streamlit run app.py
