@@ -16,7 +16,7 @@
 
 ## ✨ 核心亮点
 
-- **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph，四个版本代码全部保留（v4 为主，v1-v3 见 src/agent/legacy/）。
+- **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph（当前线上版本）。早期版本已归档，演进记录见 git 历史。
 - **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前线上配置为纯向量检索（经 A/B 测试，当前文档场景下纯向量优于混合），保留 BM25 代码可一键切换。
 - **RAG 评估体系**：基于业界标准 **ragas** 的四维量化评估（0-100 百分制），支持「同一测试集多配置对比」+ 历史存档；另保留手写 LLM Judge 作对照。
 - **多模态文档解析**：基于 RapidOCR 的本地 OCR，支持**图片直读 + 扫描版 PDF 识别**，数据不出域；命中图片块时可接本地视觉模型（Ollama minicpm-v 等）真·看图。
@@ -247,7 +247,8 @@ dev-agent/
 │   ├── parser.py / chunker.py    # 文档解析与分块
 │   ├── vector_store.py           # Chroma 向量存储
 │   ├── rag_agent.py              # RAG 问答 Agent
-│   └── evaluate_rag.py           # 评估脚本（已归档）
+│   └── hybrid_retriever.py       # 混合检索（BM25 + 向量 + RRF）
+├── scripts/                      # 运维脚本（seed.py 预置演示知识库）
 ├── knowledge/                    # 知识库文档
 ├── Dockerfile + docker-compose.yml
 └── requirements.txt
