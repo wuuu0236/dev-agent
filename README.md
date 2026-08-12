@@ -8,7 +8,7 @@
 
 基于 **LangGraph + FastAPI + Streamlit** 的完整 AI Agent + RAG 系统。支持 HTTP API 调用、Web 前端交互、Docker 一键部署，已上线可演示。
 
-> 从 `while` 循环到 `StateGraph`，从本地玩具到线上产品——**四次架构迭代代码全部同仓保留**，可以看到一个 AI Agent 是怎么长成现在这样的。
+> 从 `while` 循环到 `StateGraph`，从本地玩具到线上产品。四次架构迭代的演进记录见 git 历史（`git log`），当前线上版本为 LangGraph StateGraph。
 
 🌐 **在线演示**：https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/
 
@@ -23,7 +23,8 @@
 - **私有化 / 离线部署**：推理后端可一键切换为本地 **Ollama**（qwen2.5:7b 等），Embedding 亦可走本地模型，实现**完全离线、数据不出本机**的本地个人使用。
 - **多知识库隔离 + 评估面板**：SQLite 管理元数据、Chroma 管理向量，支持多知识库并行管理；Streamlit 评估面板对上传的真实文档直接跑 LLM 评估指标。
 - **MCP 工具暴露**：FastMCP 将 RAG 工具以 MCP 协议暴露，与 Claude Code 打通；文件工具带三层安全审查（黑名单 → 敏感文件检测 → 白名单）。
-- **一键部署**：Dockerfile + docker-compose 本地部署，Streamlit Cloud 线上托管，面试官打开链接就能演示。
+- **语义缓存**：重复 / 相似问题直接命中缓存秒回，不重复调模型（靠问题向量余弦相似度匹配，换个说法也能命中）；知识库文档变化时缓存自动作废。
+- **一键部署**：Dockerfile + docker-compose 本地部署，Streamlit Cloud 线上托管，面试官打开链接就能演示（冷启动自动预置演示知识库，开箱即用）。
 
 ---
 
@@ -58,6 +59,8 @@ flowchart LR
 
 关键原则：**知识库问答走 RAG，文件/工具操作走 Agent**，各司其职——而不是把 RAG 也塞进 ReAct 循环，那只会让问答变慢、引用变难。两条路径共用 `HybridRetriever`（检索结果一致），都支持最近 6 轮对话注入（多轮追问不丢上下文）。`/chat/stream` 是**真流式**（按 token 吐），不是跑完再切块的假流式。
 
+Web 问答路径还带**语义缓存**（`src/query_cache.py`）：无历史的独立提问先查缓存，命中直接秒回——本质是「数据库查询缓存的知识库版」，键换成问题向量、按余弦相似度模糊匹配（换说法也能命中）；知识库文档变化（上传/删除）时缓存自动作废。实测同问命中约 **0.2s**（首次生成约 6s）。
+
 ---
 
 ## 🚀 快速开始
@@ -69,6 +72,7 @@ pip install -r requirements.txt
 cp .env.example .env    # 填入你的 DEEPSEEK_API_KEY
 streamlit run app.py
 # 浏览器打开 http://localhost:8501
+# 首次启动自动预置「DataLens 演示」知识库（scripts/seed.py），打开即可直接问答
 ```
 
 ### 方式二：HTTP API（FastAPI）
@@ -247,7 +251,8 @@ dev-agent/
 │   ├── parser.py / chunker.py    # 文档解析与分块
 │   ├── vector_store.py           # Chroma 向量存储
 │   ├── rag_agent.py              # RAG 问答 Agent
-│   └── hybrid_retriever.py       # 混合检索（BM25 + 向量 + RRF）
+│   ├── hybrid_retriever.py       # 混合检索（BM25 + 向量 + RRF）
+│   └── query_cache.py            # 语义缓存（重复问题秒回）
 ├── scripts/                      # 运维脚本（seed.py 预置演示知识库）
 ├── knowledge/                    # 知识库文档
 ├── Dockerfile + docker-compose.yml
