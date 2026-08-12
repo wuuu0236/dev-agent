@@ -245,6 +245,18 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     网页用 st.write_stream(gen) 渲染打字机效果；sources 用于展示引用来源。
     rag_query（非流式）保留给评估面板使用。history 为最近对话轮次（多轮追问）。
     """
+    from src.query_cache import get_cached_answer, cache_answer  # 模块顶层 import 无副作用（embedding 惰性）
+
+    # --- 语义缓存：无历史的独立提问先查缓存，命中直接秒回（不检索、不调模型）---
+    # 命中时 sources 用缓存的引用来源；前端 display_sources = cited or sources 无缝兼容。
+    if not history:
+        cached = get_cached_answer(kb_id, query)
+        if cached is not None:
+            def gen_cached():
+                yield cached["answer"]
+
+            return gen_cached(), cached["sources"], []
+
     retriever = HybridRetriever(kb_id)
     contexts = retriever.search(query, top_k=top_k)
 
@@ -265,8 +277,17 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             })
 
     def gen():
-        yield from stream_generate_answer(query, contexts, backend=backend, vision_model=vision_model,
-                                          history=history)
+        full_answer = ""
+        for chunk in stream_generate_answer(query, contexts, backend=backend, vision_model=vision_model,
+                                            history=history):
+            yield chunk
+            full_answer += chunk
+        # 无历史才缓存：带历史的追问是个性化的，命中率低且易错配
+        if not history and full_answer:
+            try:
+                cache_answer(kb_id, query, full_answer, unique_sources)
+            except Exception:
+                pass  # 缓存失败不影响回答
 
     return gen(), unique_sources, contexts
 

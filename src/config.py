@@ -62,6 +62,13 @@ CHUNK_OVERLAP = 50     # 相邻 chunk 重叠的字符数
 # --- 检索配置 ---
 TOP_K_RETRIEVE = 5     # 检索返回的文档数
 RAG_HISTORY_TURNS = 6  # 注入的最近对话条数（按消息条数切，非严格"轮"；Web 与 API 两条路径一致）
+
+# --- 语义缓存（RAG 问答路径）---
+# 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。
+# 失效：知识库文档变化时清空该库缓存（见 vector_store 的 clear_kb_cache 钩子）。
+QUERY_CACHE_ENABLED = os.getenv("QUERY_CACHE_ENABLED", "true").lower() == "true"
+QUERY_CACHE_THRESHOLD = float(os.getenv("QUERY_CACHE_THRESHOLD", "0.90"))  # 语义命中阈值
+QUERY_CACHE_MAX_PER_KB = 200  # 每知识库缓存上限（条），超限删最旧
 BM25_WEIGHT = 0     # RRF 融合中 BM25 的权重（当前纯向量，经 A/B 测试该场景下纯向量优于混合检索）
 VECTOR_WEIGHT = 1   # RRF 融合中向量检索的权重（调回 BM25_WEIGHT=1 即可恢复混合检索）
 

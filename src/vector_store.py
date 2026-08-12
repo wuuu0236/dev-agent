@@ -88,6 +88,8 @@ def add_chunks(kb_id: str, chunks: list[dict]):
         embeddings=embeddings,
         metadatas=metadatas
     )
+    # 知识库内容变化 → 语义缓存作废（等价"表被写入"清查询缓存）
+    _clear_query_cache(kb_id)
 
 
 def search_similar(kb_id: str, query: str, top_k: int = 5) -> list[dict]:
@@ -142,6 +144,15 @@ def get_all_chunks(kb_id: str) -> list[dict]:
     ]
 
 
+def _clear_query_cache(kb_id: str):
+    """知识库内容变化时作废语义缓存。惰性 import，避免模块循环依赖。"""
+    try:
+        from src.query_cache import clear_kb_cache
+        clear_kb_cache(kb_id)
+    except Exception:
+        pass  # 缓存模块不可用不影响主流程
+
+
 def delete_collection(kb_id: str):
     """删除知识库对应的向量集合"""
     client = _get_client()
@@ -149,6 +160,7 @@ def delete_collection(kb_id: str):
         client.delete_collection(_collection_name(kb_id))
     except Exception:
         pass
+    _clear_query_cache(kb_id)
 
 
 def collection_count(kb_id: str) -> int:
