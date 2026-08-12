@@ -12,9 +12,26 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 初始化数据库 ---
-from src.database import init_db
-init_db()
+# --- 初始化数据库（只做一次）---
+# Streamlit 每次交互都重跑整页脚本；init_db 是幂等的建表检查，没必要每次跑。
+# cache_resource 让整个进程只初始化一次。
+from src.database import init_db as _init_db
+
+
+@st.cache_resource
+def _init_db_once():
+    _init_db()
+    # 冷启动自动补演示知识库（scripts/seed.py，幂等）：
+    # data/ 不进 git，新部署是空库；导入种子后评审打开即可直接问答。
+    # 失败（如没配 embedding key）不阻塞启动，留待下次冷启动重试。
+    try:
+        from scripts.seed import ensure_seed_data
+        ensure_seed_data(verbose=False)
+    except Exception:
+        pass
+
+
+_init_db_once()
 
 # --- 侧边栏 ---
 st.sidebar.title("📚 DataLens")

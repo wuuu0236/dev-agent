@@ -10,8 +10,23 @@ st.set_page_config(page_title="智能问答 - DataLens", page_icon="💬")
 
 st.title("💬 智能问答")
 
+
+# --- 缓存：知识库列表 / 统计 ---
+# Streamlit 每次交互都会重跑整页脚本，切下拉框、清空对话都会触发。
+# 这两次 SQLite 查询单独看很轻，但次数一多页面就"不跟手"。
+# 包一层 cache_data：5 秒内不重复查库（新传文档最多延迟 5 秒刷新，可接受）。
+@st.cache_data(ttl=5)
+def _cached_list_kbs():
+    return list_kbs()
+
+
+@st.cache_data(ttl=5)
+def _cached_kb_stats(kb_id: str) -> dict:
+    return get_kb_stats(kb_id)
+
+
 # --- 选择知识库 ---
-kbs = list_kbs()
+kbs = _cached_list_kbs()
 if not kbs:
     st.warning("请先在「知识库管理」中创建知识库并上传文档。")
     st.stop()
@@ -21,7 +36,7 @@ selected_name = st.selectbox("选择知识库", list(kb_names.keys()), key="qa_k
 kb_id = kb_names[selected_name]
 
 # 显示知识库统计
-stats = get_kb_stats(kb_id)
+stats = _cached_kb_stats(kb_id)
 if stats["total_chunks"] == 0:
     st.warning("该知识库还没有文档，请先上传。")
     st.stop()

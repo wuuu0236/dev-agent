@@ -26,6 +26,20 @@ with st.expander("➕ 创建新知识库", expanded=False):
         else:
             st.error("请输入知识库名称")
 
+# --- 缓存：统计数字（chroma 查询最重）---
+# 管理页每次交互整页重跑，会对每个知识库循环查 SQLite + chroma。
+# 库一多，点一下就要查 N 次 chroma，这是本页卡顿主因。
+# 只缓存数字（文档数 / chunk 数），5 秒内复用；列表不缓存——删库/建库后要即时刷新。
+@st.cache_data(ttl=5)
+def _cached_kb_stats(kb_id: str) -> dict:
+    return get_kb_stats(kb_id)
+
+
+@st.cache_data(ttl=5)
+def _cached_collection_count(kb_id: str) -> int:
+    return collection_count(kb_id)
+
+
 # --- 知识库列表 ---
 st.subheader("📋 我的知识库")
 kbs = list_kbs()
@@ -34,8 +48,8 @@ if not kbs:
     st.info("还没有知识库，点击上方「创建新知识库」开始。")
 else:
     for kb in kbs:
-        stats = get_kb_stats(kb["id"])
-        chroma_count = collection_count(kb["id"])
+        stats = _cached_kb_stats(kb["id"])
+        chroma_count = _cached_collection_count(kb["id"])
 
         col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
         with col1:
