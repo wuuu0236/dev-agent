@@ -95,7 +95,8 @@ def run_ragas_eval(kb_id: str, test_questions: list[dict], top_k: int = 5) -> di
     details = []
 
     # 1. 对每题跑 RAG 管线（检索 + 生成），收集 answer 和 retrieved_contexts
-    for item in test_questions:
+    total = len(test_questions)
+    for idx, item in enumerate(test_questions, 1):
         result = rag_query(kb_id, item["question"], top_k=top_k)
         contexts = [c["content"] for c in result.get("contexts", [])]
         samples.append(SingleTurnSample(
@@ -108,6 +109,7 @@ def run_ragas_eval(kb_id: str, test_questions: list[dict], top_k: int = 5) -> di
             "question": item["question"],
             "answer": result["answer"],
         })
+        print(f"  [生成] {idx}/{total}  {item['question'][:24]}", flush=True)
 
     # 2. RAGAS 打分（LLM judge + 语义相似度）
     dataset = EvaluationDataset(samples=samples)
@@ -116,7 +118,7 @@ def run_ragas_eval(kb_id: str, test_questions: list[dict], top_k: int = 5) -> di
         metrics=list(METRICS),
         llm=_make_llm(),
         embeddings=_make_embeddings(),
-        show_progress=False,
+        show_progress=True,
         raise_exceptions=False,  # 单题失败不拖垮整批，分数记 0
     )
 
