@@ -20,6 +20,7 @@ import fitz  # PyMuPDF
 from docx import Document
 
 from src.config import ENABLE_OCR
+from src.cleaner import clean_parsed
 
 # 图片扩展名（小写、带点）
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -145,17 +146,22 @@ def parse_image(file_path: str) -> list[dict]:
 
 
 def parse_file(file_path: str) -> list[dict]:
-    """统一入口：根据文件后缀分发给对应的解析器"""
+    """统一入口：根据文件后缀分发给对应的解析器。
+
+    流水线：解析 → **清洗**（归一化 / 去页眉页脚 / 合并断行 / 丢垃圾块）→ 返回。
+    清洗收口在这里而不是散在各调用方，保证任何入库路径（Web 上传、Agent 工具、
+    脚本灌库）都跑不掉。可用 CLEANER_ENABLED=false 关闭做 A/B 对比。
+    """
     ext = Path(file_path).suffix.lower()
 
     if ext == ".pdf":
-        return parse_pdf(file_path)
+        parsed = parse_pdf(file_path)
     elif ext == ".docx":
-        return parse_docx(file_path)
+        parsed = parse_docx(file_path)
     elif ext in [".txt", ".md", ".csv"]:
-        return parse_txt(file_path)
+        parsed = parse_txt(file_path)
     elif ext in _IMAGE_EXTS:
-        return parse_image(file_path)
+        parsed = parse_image(file_path)
     else:
         # 未知类型：返回占位块，避免上游因异常中断
         return [{
@@ -165,3 +171,5 @@ def parse_file(file_path: str) -> list[dict]:
             "type": "text",
             "image": None,
         }]
+
+    return clean_parsed(parsed)

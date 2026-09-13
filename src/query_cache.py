@@ -14,6 +14,7 @@ query_cache.py — 语义缓存（RAG 问答路径）
 _embed 惰性 import，测试用固定向量 monkeypatch。
 """
 import json
+import os
 import struct
 from datetime import datetime
 
@@ -24,6 +25,11 @@ from src.config import (
 )
 
 _CACHE_TABLE = "query_cache"
+
+# 缓存向量版本：当"查询侧怎么编码向量"发生变化时（典型如启用 BGE 指令前缀），
+# 新旧向量不再在同一个语义空间，旧缓存若继续参与比对就会永不命中甚至错配。
+# 用版本号做隔离：旧行自动失配失效，新缓存写入当前版本，无需手动清表。
+CACHE_VEC_VERSION = os.getenv("CACHE_VEC_VERSION", "bge_q1")
 
 
 def _connect():
@@ -49,14 +55,25 @@ def _init_table():
         ")"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_kb ON " + _CACHE_TABLE + "(kb_id)")
+    # 兼容旧库：vec_ver 列可能不存在，补上。旧行默认为空串 → 与新版本号不匹配
+    # → 自动失效，不用手动清表。
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(" + _CACHE_TABLE + ")")}
+    if "vec_ver" not in cols:
+        conn.execute(
+            "ALTER TABLE " + _CACHE_TABLE + " ADD COLUMN vec_ver TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()
     conn.close()
 
 
 def _embed(text: str) -> np.ndarray:
-    """问题转向量。惰性 import embeddings：CI/测试无 key 也能 import 本模块。"""
-    from src.embeddings import embed_single
-    return np.asarray(embed_single(text), dtype=np.float32)
+    """问题转向量。惰性 import embeddings：CI/测试无 key 也能 import 本模块。
+
+    走 embed_query（带 BGE 指令前缀），与检索侧保持一致——
+    两边编码方式一致，缓存的余弦对比才有意义。
+    """
+    from src.embeddings import embed_query
+    return np.asarray(embed_query(text), dtype=np.float32)
 
 
 def _pack(vec: np.ndarray) -> bytes:
@@ -82,8 +99,9 @@ def get_cached_answer(kb_id: str, query: str) -> dict | None:
     q_vec = _embed(query)
     conn = _connect()
     rows = conn.execute(
-        f"SELECT embedding, answer, sources FROM {_CACHE_TABLE} WHERE kb_id = ?",
-        (kb_id,),
+        f"SELECT embedding, answer, sources FROM {_CACHE_TABLE}"
+        f" WHERE kb_id = ? AND vec_ver = ?",
+        (kb_id, CACHE_VEC_VERSION),
     ).fetchall()
     conn.close()
 
@@ -104,11 +122,11 @@ def cache_answer(kb_id: str, query: str, answer: str, sources: list[dict]):
     _init_table()
     conn = _connect()
     conn.execute(
-        f"INSERT INTO {_CACHE_TABLE} (kb_id, question, embedding, answer, sources, created_at)"
-        f" VALUES (?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO {_CACHE_TABLE} (kb_id, question, embedding, answer, sources, created_at, vec_ver)"
+        f" VALUES (?, ?, ?, ?, ?, ?, ?)",
         (kb_id, query, _pack(_embed(query)), answer,
          json.dumps(sources, ensure_ascii=False),
-         datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), CACHE_VEC_VERSION),
     )
     # 容量控制：超过上限，删掉最旧（rowid 最小）的多余条目
     row = conn.execute(

@@ -1,0 +1,205 @@
+{
+  "meta": {
+    "kb_id": "83cd2d0c",
+    "kb_name": "RAG 评测语料库",
+    "version": "1.1",
+    "created": "2026-09-11",
+    "doc_count": 14,
+    "chunk_count": 108,
+    "note": "RAG 检索质量回归测试集。expected_sources 必须与 Chroma 的 source 字段一致（parser 用 Path(file).name，即文件名）。v1.1：原库只有 6 文档/18 chunk，top_k=5 捞了全库 28%，Recall@5 恒为 1.0 无法区分优化效果；改用 scripts/build_eval_kb.py 建的 108 chunk 语料库，难度足够。重建语料后需同步更新此 kb_id。",
+    "usage": "python scripts/eval_retrieval.py --kb f99c2c78"
+  },
+  "cases": [
+    {
+      "id": "q01",
+      "question": "AI Agent 的三个核心要素是什么？",
+      "expected_sources": ["01-agent-fundamentals.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q02",
+      "question": "ReAct 全称是什么？它包含哪三个阶段？",
+      "expected_sources": ["01-agent-fundamentals.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q03",
+      "question": "为什么 Agent 不能没有循环？",
+      "expected_sources": ["01-agent-fundamentals.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q04",
+      "question": "实现 Agent 循环最简单的方式是什么？",
+      "expected_sources": ["01-agent-fundamentals.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q05",
+      "question": "RAG 解决了大模型的哪两个核心问题？",
+      "expected_sources": ["02-rag-pipeline.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q06",
+      "question": "RAG 全链路包含哪五个步骤？",
+      "expected_sources": ["02-rag-pipeline.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q07",
+      "question": "余弦相似度的计算公式是什么？",
+      "expected_sources": ["02-rag-pipeline.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q08",
+      "question": "RAG 和普通关键词搜索有什么区别？",
+      "expected_sources": ["02-rag-pipeline.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q09",
+      "question": "文档分段时每段多少字比较合适？",
+      "expected_sources": ["02-rag-pipeline.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q10",
+      "question": "为什么相邻 chunk 之间要设置 overlap 重叠？",
+      "expected_sources": ["02-rag-pipeline.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q11",
+      "question": "向量数据库和传统数据库存的东西有什么不同？",
+      "expected_sources": ["02-rag-pipeline.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q12",
+      "question": "StateGraph 的三个核心概念是什么？",
+      "expected_sources": ["03-langgraph-guide.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q13",
+      "question": "怎么给 Agent 添加一个新工具？",
+      "expected_sources": ["03-langgraph-guide.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q14",
+      "question": "LangGraph 是哪个团队开发的？",
+      "expected_sources": ["03-langgraph-guide.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q15",
+      "question": "条件边在 Agent 循环里起什么作用？",
+      "expected_sources": ["03-langgraph-guide.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q16",
+      "question": "MCP 的全称是什么，是谁提出的？",
+      "expected_sources": ["04-mcp-protocol.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q17",
+      "question": "MCP 采用什么架构？支持哪两种传输协议？",
+      "expected_sources": ["04-mcp-protocol.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q18",
+      "question": "MCP 被比喻成什么协议？为什么这么比喻？",
+      "expected_sources": ["04-mcp-protocol.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q19",
+      "question": "本项目用什么框架实现 MCP Server？",
+      "expected_sources": ["04-mcp-protocol.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q20",
+      "question": "Dev Agent 推荐的部署方式是什么？",
+      "expected_sources": ["05-dev-agent-deployment.md"],
+      "difficulty": "easy",
+      "type": "single-hop"
+    },
+    {
+      "id": "q21",
+      "question": "为什么 Docker 环境统一使用 Python 3.11？",
+      "expected_sources": ["05-dev-agent-deployment.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q22",
+      "question": "Dockerfile 和 docker-compose.yml 的分工有什么区别？",
+      "expected_sources": ["05-dev-agent-deployment.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q23",
+      "question": "dev-agent 经历了哪四个版本的迭代？",
+      "expected_sources": ["05-dev-agent-deployment.md"],
+      "difficulty": "medium",
+      "type": "single-hop"
+    },
+    {
+      "id": "q24",
+      "question": "LangGraph 相比 while 循环在可扩展性上有什么优势？",
+      "expected_sources": ["01-agent-fundamentals.md", "03-langgraph-guide.md"],
+      "difficulty": "hard",
+      "type": "multi-hop"
+    },
+    {
+      "id": "q25",
+      "question": "Agent 的工具调用和 MCP 协议是什么关系？",
+      "expected_sources": ["04-mcp-protocol.md", "01-agent-fundamentals.md"],
+      "difficulty": "hard",
+      "type": "multi-hop"
+    },
+    {
+      "id": "n01",
+      "question": "今天长沙天气怎么样？",
+      "expected_sources": [],
+      "difficulty": "negative",
+      "type": "negative",
+      "note": "负样本：知识库中不存在相关内容，期望低相似度（用于将来验证阈值拒答）"
+    },
+    {
+      "id": "n02",
+      "question": "公司年假有几天？",
+      "expected_sources": [],
+      "difficulty": "negative",
+      "type": "negative",
+      "note": "负样本：企业制度类问题，公开文档库里没有"
+    }
+  ]
+}

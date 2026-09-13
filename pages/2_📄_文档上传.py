@@ -102,7 +102,7 @@ if uploaded_files:
                     fail_count += 1
                     continue
 
-                # 2. 切块
+                # 2. 切块（清洗已在 parse_file 内完成：去页眉页脚 / 合并断行 / 丢垃圾块）
                 status_text.text(f"✂️ 切块: {uf.name} ({len(parsed)} 段落)")
                 chunks = chunk_parsed(parsed)
 

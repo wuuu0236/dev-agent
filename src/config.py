@@ -58,10 +58,40 @@ EMBEDDING_DIM = 1024  # BGE-large-zh 输出 1024 维
 # --- Chunk 配置 ---
 CHUNK_SIZE = 500       # 每个 chunk 的字符数
 CHUNK_OVERLAP = 50     # 相邻 chunk 重叠的字符数
+# 标题树分块（对标 MaxKB）：按 Markdown 标题切段，段内再滑窗；小于该长度的段并入相邻段
+# 默认关闭——2026-09-11 实测（同源 14 篇 md，新库 16684ef4 vs 旧库 83cd2d0c）：
+#   Recall@5 0.960→0.940 / Hit@1 0.840→0.800 / MRR 0.887→0.873，四项全降或持平。
+# 原因：md 语料的标题文字本就在正文里，路径前缀是冗余；且按 500 字打包后粒度与滑窗无异。
+# 该策略的收益场景是 PDF/Word（原文无结构标题），拿到真实 PDF 样本后应重开并复测。
+CHUNK_TREE_ENABLED = os.getenv("CHUNK_TREE_ENABLED", "false").lower() == "true"
+CHUNK_MIN_SIZE = int(os.getenv("CHUNK_MIN_SIZE", "120"))  # 过短段落合并阈值
+CHUNK_PATH_SEP = os.getenv("CHUNK_PATH_SEP", " > ")       # 标题路径分隔符
+CHUNK_PATH_MAXLEN = int(os.getenv("CHUNK_PATH_MAXLEN", "120"))  # 路径前缀最长字符数
 
 # --- 检索配置 ---
 TOP_K_RETRIEVE = 5     # 检索返回的文档数
 RAG_HISTORY_TURNS = 6  # 注入的最近对话条数（按消息条数切，非严格"轮"；Web 与 API 两条路径一致）
+
+# 候选池大小：粗排阶段先捞多少条给精排用。
+# 这是「粗排 → 精排」架构的前提——召回只取 top_k 的话，精排再准也只能
+# 从这几条里挑；必须先多捞，精排才有发挥空间。
+# 设为 0 表示自动 = top_k * 10（top_k=5 时捞 50 条）。
+RETRIEVE_CANDIDATES = int(os.getenv("RETRIEVE_CANDIDATES", "0"))
+
+# --- Rerank 精排（交叉编码）---
+# 为什么需要：向量检索是「双塔」——query 和 doc 分开编码成向量再比余弦，
+# 快但两者从未见过面，丢失词级交互；reranker 是「交叉编码」——把 query 和
+# doc 拼在一起过一遍模型，直接输出相关性分数，准但慢，只能对小候选集用。
+# 所以架构是：粗排（双塔捞候选池）→ 精排（交叉编码挑最终 top_k）。
+# 另一个关键差别：reranker 的分数有绝对意义（实测相关 0.86 / 不相关 0.00002），
+# 而 RRF 分数 1/(60+rank) 无绝对意义——所以「相似度阈值拒答」应该建在
+# rerank 分数上，不是建在 RRF 分数上。
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_API_KEY = os.getenv("RERANK_API_KEY", EMBEDDING_API_KEY)
+RERANK_API_BASE = os.getenv("RERANK_API_BASE", EMBEDDING_API_BASE)
+RERANK_TIMEOUT = float(os.getenv("RERANK_TIMEOUT", "60"))
+RERANK_MAX_DOC_CHARS = int(os.getenv("RERANK_MAX_DOC_CHARS", "1500"))  # 单条送审文本上限，防超长
 
 # --- 语义缓存（RAG 问答路径）---
 # 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。

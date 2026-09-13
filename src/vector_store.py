@@ -13,7 +13,7 @@ import shutil
 import chromadb
 from chromadb.config import Settings
 from src.config import CHROMA_DIR, EMBEDDING_DIM
-from src.embeddings import embed_texts, embed_single
+from src.embeddings import embed_texts, embed_single, embed_query
 
 
 _client = None  # 单例缓存（chromadb 1.x 里 PersistentClient 是工厂函数，不做类型注解）
@@ -102,7 +102,8 @@ def search_similar(kb_id: str, query: str, top_k: int = 5) -> list[dict]:
     client = _get_client()
     collection = client.get_collection(_collection_name(kb_id))
 
-    query_embedding = [embed_single(query)]
+    # 检索查询走 embed_query（自动带 BGE 指令前缀）；文档入库走 embed_texts，不带前缀
+    query_embedding = [embed_query(query)]
 
     results = collection.query(
         query_embeddings=query_embedding,

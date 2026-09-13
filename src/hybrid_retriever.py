@@ -16,7 +16,7 @@ from rank_bm25 import BM25Okapi
 # 注意：不在这里 import vector_store（chromadb 是重型原生依赖）。
 # 只有真正查库时才 import（惰性）——让分词/检索逻辑本身不依赖 chromadb，
 # 也保证 CI 冒烟测试无需安装 chromadb。
-from src.config import TOP_K_RETRIEVE, BM25_WEIGHT, VECTOR_WEIGHT
+from src.config import TOP_K_RETRIEVE, BM25_WEIGHT, VECTOR_WEIGHT, RETRIEVE_CANDIDATES
 
 
 def _tokenize(text: str) -> list[str]:
@@ -42,7 +42,15 @@ _bm25_cache: dict[str, tuple[int, BM25Okapi | None, list[dict]]] = {}
 
 
 def _get_bm25(kb_id: str) -> tuple[BM25Okapi | None, list[dict]]:
-    """按 kb_id 取（BM25 索引, 全量 chunk），有增删时自动重建。"""
+    """按 kb_id 取（BM25 索引, 全量 chunk），有增删时自动重建。
+
+    BM25 权重为 0 时（config.BM25_WEIGHT=0，即当前配置）直接短路：
+    建索引要从 Chroma 拉全量 chunk 再逐条分词，成本不低，而融合时
+    贡献是 0/(60+rank)=0——纯属白算。想恢复混合检索，把权重调回 1 即可，
+    这里会自动重新启用。
+    """
+    if BM25_WEIGHT == 0:
+        return None, []
     from src.vector_store import collection_count, get_all_chunks  # 惰性：只有查库才拖 chromadb
     current_count = collection_count(kb_id)
     cached = _bm25_cache.get(kb_id)
@@ -71,17 +79,28 @@ class HybridRetriever:
     def __init__(self, kb_id: str):
         self.kb_id = kb_id
 
-    def search(self, query: str, top_k: int = TOP_K_RETRIEVE) -> list[dict]:
+    def search(self, query: str, top_k: int = TOP_K_RETRIEVE,
+               rerank: bool | None = None) -> list[dict]:
         """
-        混合检索主流程：
-        1. 向量检索（语义匹配）
+        检索主流程（粗排 → 精排）：
+        1. 向量检索（双塔，粗排）——先捞候选池 candidate_k 条，不是 top_k 条
         2. BM25 检索（关键词匹配）
         3. RRF 融合两路排名
-        4. 返回融合后的 top_k 结果
+        4. Rerank 精排（交叉编码）——从候选池里挑出最终 top_k
+
+        为什么要先捞 candidate_k：精排只能从粗排给它的东西里挑。
+        粗排只给 5 条，精排再准也只能在这 5 条里排序；给 50 条，精排才有
+        足够的发挥空间。这一步的代价是向量检索多算了 10 倍，但向量检索本身
+        很便宜（毫秒级），换来精排可用的候选池，是划算的。
+
+        rerank: 显式覆盖精排开关（评测做 A/B 用），None 则读 config.RERANK_ENABLED
         """
-        # --- 向量检索 ---
+        # 候选池：0 表示自动 = top_k * 10
+        candidate_k = RETRIEVE_CANDIDATES or top_k * 10
+
+        # --- 向量检索（粗排）---
         from src.vector_store import search_similar  # 惰性：只有真查库才拖 chromadb
-        vector_results = search_similar(self.kb_id, query, top_k=top_k * 2)
+        vector_results = search_similar(self.kb_id, query, top_k=candidate_k)
         # 给每个结果标上向量检索的排名（1 = 最相关）
         for rank, r in enumerate(vector_results, start=1):
             r["vector_rank"] = rank
@@ -93,7 +112,7 @@ class HybridRetriever:
             scores = bm25.get_scores(_tokenize(query))
             indexed = list(enumerate(scores))
             indexed.sort(key=lambda x: x[1], reverse=True)
-            for rank, (idx, score) in enumerate(indexed[:top_k * 2], start=1):
+            for rank, (idx, score) in enumerate(indexed[:candidate_k], start=1):
                 chunk = chunks[idx]
                 bm25_mapped.append({
                     "content": chunk["content"],
@@ -136,9 +155,13 @@ class HybridRetriever:
                     "rrf_score": bm25_contrib
                 }
 
-        # 按 RRF 分数从高到低排序
+        # 按 RRF 分数从高到低排序（粗排完成，候选池 size = candidate_k）
         sorted_results = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)
-        return sorted_results[:top_k]
+
+        # --- Rerank 精排（交叉编码）---
+        # 失败会自动降级为「粗排顺序的前 top_k」，不会打断问答链路
+        from src.reranker import rerank as _rerank
+        return _rerank(query, sorted_results, top_k, enabled=rerank)
 # ================================================================
 # 模块级函数：供 v4 Agent 和 MCP 调用（统一入口）
 # ================================================================
@@ -181,7 +204,9 @@ def add_knowledge(texts: list[str]) -> str:
     """把文本添加到知识库"""
     kb_id = _ensure_kb()
     from src.chunker import chunk_parsed
+    from src.cleaner import clean_parsed
     docs = [{"text": t, "page": None, "source": "agent_"} for t in texts]
+    docs = clean_parsed(docs)
     chunks = chunk_parsed(docs)
     if not chunks:
         return "没有可添加的内容"
@@ -201,7 +226,7 @@ def load_file_to_knowledge(filepath: str) -> str:
     from src.vector_store import add_chunks
     kb_id = _ensure_kb()
     try:
-        parsed = parse_file(filepath)
+        parsed = parse_file(filepath)   # 内部已含清洗
         if not parsed:
             return f"文件 '{filepath}' 没有可解析的内容"
         chunks = chunk_parsed(parsed)
