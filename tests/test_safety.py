@@ -62,12 +62,20 @@ def test_blacklist_subdir_rejects(sandbox):
 
 def test_path_within_boundary():
     """边界语义：'Windows' 只属于自身及其子目录，不误配 'WindowsApps'。
-    修复前用 startswith，C:\\WindowsApps 这类普通应用目录会被误杀。"""
-    base = "C:\\Windows"
-    assert safety._path_within("C:\\Windows\\System32\\cmd.exe", base)   # 子路径
-    assert safety._path_within("C:\\Windows", base)                      # 本身
-    assert not safety._path_within("C:\\WindowsApps\\store", base)       # 前缀同名
-    assert not safety._path_within("C:\\Windows.old\\x", base)           # 前缀同名
+    修复前用 startswith，C:\\WindowsApps 这类普通应用目录会被误杀。
+
+    ⚠️ 路径用 `os.sep` 拼，**不能写死反斜杠**。`_path_within` 是按 `os.sep` 对齐
+    目录段的（Windows 上 `\\`、Linux 上 `/`），喂写死的 Windows 字面量进去，
+    在 Linux 上会算成 `"c:\\windows" != "c:\\windows/"` → 子路径判定为 False。
+    这条测试因此只在 Windows 绿，而 CI 跑 ubuntu：**CI 从 2026-08-13 起红了一个月**
+    （`790925a` 引入，exit code 1，正是本测试）。写死分隔符的测试等于没测。
+    """
+    base = os.sep.join(["", "srv", "Windows"])       # Windows→ \srv\Windows；Linux→ /srv/Windows
+    sub = os.sep.join([base, "System32", "cmd.exe"])
+    assert safety._path_within(sub, base)                                    # 子路径
+    assert safety._path_within(base, base)                                   # 本身
+    assert not safety._path_within(base + "Apps" + os.sep + "store", base)   # 前缀同名
+    assert not safety._path_within(base + ".old" + os.sep + "x", base)       # 前缀同名
 
 
 # ---------- 第二层：敏感文件 ----------

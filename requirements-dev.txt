@@ -1,7 +1,16 @@
-# 冒烟测试依赖（CI 用）——只装跑核心逻辑测试需要的包。
-# 刻意不装 requirements.txt 里的重型组件（RapidOCR / RAGAS 评估 / Streamlit 前端 / chromadb），
+# 冒烟测试依赖（CI 用）。
+#
+# 取舍：刻意不装 requirements.txt 里真正的重型组件（RapidOCR / RAGAS 评估 / Streamlit 前端），
 # 让 CI 快而稳、失败点少。完整运行环境仍用 requirements.txt 本地安装。
-# chromadb 靠惰性 import（见 src/hybrid_retriever.py），测试不 import 它。
+#
+# ⚠️ 2026-09-14 纠正一处**已失效的假设**（CI 因此红了一个月，见下）：
+#    原文写着「chromadb 靠惰性 import（见 src/hybrid_retriever.py），测试不 import 它」。
+#    实际上惰性只发生在 hybrid_retriever 里：`src/vector_store.py:14` 是**模块级**
+#    `import chromadb`，`src/parser.py:21` 是**模块级** `from docx import Document`。
+#    于是 tests/ 里任何 import 到这两个模块的文件，都会在**收集阶段**就 ImportError
+#    （pytest 退出码 2，整个 job 直接失败，连别的测试都不会跑）。
+# → **判断一个包该不该在这里，依据不是"装起来快不快"，而是"测试有没有 import 到它"。**
+#   改了 tests/ 的 import 之后，请重新对一遍这个清单。
 langgraph>=0.2.0,<1.0
 langchain>=0.3.0,<1.0
 langchain-core>=0.3.0,<1.0
@@ -13,6 +22,10 @@ rank-bm25>=0.2.2
 jieba>=0.42.0
 langfuse>=2.50.0,<2.51.0
 pytest>=7.0
+# 被 src.vector_store / src.parser 在模块级 import，测试要能收集就必须有。
+# 版本下限与 requirements.txt 对齐，避免 CI 与线上跑在不同大版本上。
+chromadb>=0.4.0
+python-docx>=1.0.0
 # 静态检查：只报「未定义名 / 未使用导入 / 重复定义」，不带风格规则噪音。
 # 引入它是因为一个真实事故：`_get_ollama_client` 里把 `OpenAI` 写成了不存在的
 # `OpenAIClient`，云端路径完全正常、只有选 ollama 时才 NameError —— 于是被宣传的
