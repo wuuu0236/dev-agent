@@ -14,7 +14,7 @@
 import json
 from openai import OpenAI
 from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
-from src.rag_agent import rag_query
+from src.rag_qa import rag_query
 
 _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 

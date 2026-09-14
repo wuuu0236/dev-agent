@@ -3,7 +3,7 @@
 extract_cited_sources 是「引用不靠模型自觉」的执行层：
 模型只给序号 [n]，由代码把序号映射回真实检索来源，越界/编造直接丢弃。
 """
-from src.rag_agent import extract_cited_sources
+from src.rag_qa import extract_cited_sources
 
 
 def _ctx(source, page=0, ctype="text"):

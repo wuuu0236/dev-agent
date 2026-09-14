@@ -115,7 +115,7 @@ def experiment_topk(testset, quick=False):
 # ================================================================
 def experiment_prompt(testset, quick=False):
     print("\n=== 方案2: Prompt 优化前后对比 ===", flush=True)
-    import src.rag_agent as ra
+    import src.rag_qa as ra
 
     baseline_prompt = ra.SYSTEM_PROMPT  # 当前线上用的
 

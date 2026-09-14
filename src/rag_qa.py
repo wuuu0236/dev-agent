@@ -1,5 +1,9 @@
 """
-RAG 问答 Agent（Langfuse 版 · v4 API）
+RAG 问答主链路（确定性管道，**非 Agent**）
+
+链路：HybridRetriever 检索 → 交叉编码精排 → 拼上下文 → LLM 生成 → 引用映射。
+本模块不含自主决策；Agent（LangGraph 工具循环）实现在 src/agent/dev_agent_langgraph.py，
+服务于 HTTP API 路径。二者分工见 README「两条入口，一个大脑」。
 
 主要能力：
   1. rag_query / generate_answer 用 @observe 装饰，自动捕获输入输出、延迟、Token。

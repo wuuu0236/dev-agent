@@ -6,4 +6,4 @@
 def test_core_modules_import():
     import src.agent.dev_agent_langgraph  # LangGraph Agent（含 langfuse 可选降级）
     import src.hybrid_retriever          # 混合检索
-    import src.rag_agent                 # RAG 问答（@observe 装饰器）
+    import src.rag_qa                  # RAG 问答（@observe 装饰器）

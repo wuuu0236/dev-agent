@@ -1,4 +1,4 @@
-﻿# 🧠 Dev-Agent — 从 while 循环到 LangGraph 的开发助手 Agent
+﻿# 🧠 DataLens — 个人知识库 RAG 问答系统
 
 [![Live Demo](https://img.shields.io/badge/Demo-Try%20it%20now-brightgreen)](https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/)
 [![Python](https://img.shields.io/badge/Python-3.11-blue)]()
@@ -6,9 +6,9 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue)]()
 [![License](https://img.shields.io/badge/License-MIT-yellow)]()
 
-基于 **LangGraph + FastAPI + Streamlit** 的完整 AI Agent + RAG 系统。支持 HTTP API 调用、Web 前端交互、Docker 一键部署，已上线可演示。
+基于 **FastAPI + Streamlit + LangGraph** 的个人知识库问答系统：本地文档解析与索引（向量 + BM25 + RRF 融合）、交叉编码精排、RAGAS 量化评估，另带文件操作 Agent 与 MCP 工具接口。已上线可演示。
 
-> 从 `while` 循环到 `StateGraph`，从本地玩具到线上产品。四次架构迭代的演进记录见 git 历史（`git log`），当前线上版本为 LangGraph StateGraph。
+> 架构经历四轮迭代（while 循环 → 异常保护 → 流式输出 → LangGraph StateGraph），提交记录见 git 历史（`git log`）。**v1–v3 的代码文件已从仓库移除**，仓库中只保留 v4 一套实现；当前 Web 问答路径与 HTTP API 路径分别对应下面「两条入口」一节的两种实现。
 
 🌐 **在线演示**：https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/
 
@@ -16,19 +16,36 @@
 
 ## ✨ 核心亮点
 
-- **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph（当前线上版本）。早期版本已归档，演进记录见 git 历史。
-- **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前线上配置为纯向量检索（经 A/B 测试，当前文档场景下纯向量优于混合），保留 BM25 代码可一键切换。
-- **RAG 评估体系**：基于业界标准 **ragas** 的四维量化评估（0-100 百分制），支持「同一测试集多配置对比」+ 历史存档；另保留手写 LLM Judge 作对照。
+- **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph。四轮迭代的提交记录见 git 历史；**v1–v3 的代码文件已从仓库移除**，仓库目前只保留 v4 一套实现（`src/agent/dev_agent_langgraph.py`），它服务于 HTTP API 路径。
+- **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前 `BM25_WEIGHT=0`（经 A/B 测试，当前文档场景下纯向量优于混合），BM25 代码保留、改权重即可启用。
+- **交叉编码精排（Rerank）**：粗排从候选池捞 50 条，再由 `bge-reranker-v2-m3` 逐条精排取 top 5。A/B 实测（同库同测试集，只切这一个开关）：Recall@5 0.960→1.000、Hit@1 0.840→0.920、MRR 0.887→0.960。任一批次失败即整体降级为粗排顺序，不影响问答可用性。
+- **数据清洗管线**：归一化 → 跨页页眉页脚去除（按页首尾行跨页统计）→ PDF 硬换行断句合并 → 垃圾块过滤。收口在 `parser.parse_file()`，Web 上传 / Agent 工具 / 脚本灌库三条入库路径全覆盖，可一键开关做 A/B。
+- **RAG 评估体系**：基于业界标准 **ragas** 的四维量化评估（0-100 百分制），支持「同一测试集多配置对比」+ 历史存档；另保留手写 LLM Judge 作对照。检索层另有独立评测脚本（Recall@K / Hit@K / Hit@1 / MRR）。
 - **多模态文档解析**：基于 RapidOCR 的本地 OCR，支持**图片直读 + 扫描版 PDF 识别**，数据不出域；命中图片块时可接本地视觉模型（Ollama minicpm-v 等）真·看图。
 - **私有化 / 离线部署**：推理后端可一键切换为本地 **Ollama**（qwen2.5:7b 等），Embedding 亦可走本地模型，实现**完全离线、数据不出本机**的本地个人使用。
 - **多知识库隔离 + 评估面板**：SQLite 管理元数据、Chroma 管理向量，支持多知识库并行管理；Streamlit 评估面板对上传的真实文档直接跑 LLM 评估指标。
 - **MCP 工具暴露**：FastMCP 将 RAG 工具以 MCP 协议暴露，与 Claude Code 打通；文件工具带三层安全审查（黑名单 → 敏感文件检测 → 白名单）。
 - **语义缓存**：重复 / 相似问题直接命中缓存秒回，不重复调模型（靠问题向量余弦相似度匹配，换个说法也能命中）；知识库文档变化时缓存自动作废。
-- **一键部署**：Dockerfile + docker-compose 本地部署，Streamlit Cloud 线上托管，面试官打开链接就能演示（冷启动自动预置演示知识库，开箱即用）。
+- **容器化部署**：Dockerfile + docker-compose（当前 compose 只含 API 服务，详见文末「已知问题」）；Streamlit Cloud 线上托管，打开链接即可演示（冷启动自动预置演示知识库，开箱即用）。
 
 ---
 
-## 🏗️ 架构（v4 LangGraph StateGraph）
+## 🏗️ 架构
+
+**两条入口是两套实现**，分工见下一节。上面是线上演示实际跑的路径（确定性 RAG 管道，无 LangGraph）；下面是 HTTP API 路径（LangGraph 工具循环）。
+
+**Web 智能问答 — 快路径（确定性 RAG，无 LangGraph）**
+
+```mermaid
+flowchart LR
+    A[提问] --> B[HybridRetriever 粗排]
+    B --> C[候选池 50 条]
+    C --> D[交叉编码精排]
+    D --> E[top 5 拼上下文]
+    E --> F[LLM 生成答案 + 引用来源]
+```
+
+**HTTP API — 慢路径（LangGraph StateGraph）**
 
 ```mermaid
 flowchart LR
@@ -38,7 +55,7 @@ flowchart LR
     B -->|回答完毕| D[End]
 ```
 
-四次迭代速览：
+四次迭代速览（v1–v3 代码已移除，仅存于 git 历史）：
 
 | 版本 | 改进 | 解决的问题 |
 |:---:|------|------|
@@ -68,7 +85,7 @@ Web 问答路径还带**语义缓存**（`src/query_cache.py`）：无历史的�
 ### 方式一：Web 前端（推荐演示用）
 
 ```bash
-conda activate dev-agent   # 推荐用项目独立环境（Python 3.11；rapidocr 在 3.13 装不上）
+conda activate dev-agent   # 推荐用项目独立环境（Python 3.11，与 Dockerfile 一致）
 pip install -r requirements.txt
 cp .env.example .env    # 填入你的 DEEPSEEK_API_KEY
 streamlit run app.py
@@ -84,13 +101,14 @@ python src/api/server.py
 # 浏览器打开 http://localhost:8000/docs
 ```
 
-### 方式三：Docker 一键部署
+### 方式三：Docker 部署（当前仅含 API 服务）
 
 ```bash
 docker compose up
 # API: http://localhost:8000/docs
-# Web: http://localhost:8501
 ```
+
+> 该 compose 只映射并启动 FastAPI（8000）；Web 界面请按「方式一」在宿主机启动，细节见文末「已知问题」。
 
 ---
 
@@ -124,7 +142,7 @@ curl -N -X POST http://localhost:8000/chat/stream \
 | `list_files` | 列出目录内容 |
 | `read_file` | 读取文件（含三层安全审查） |
 | `search_in_files` | 按关键词搜索文件 |
-| `search_knowledge` | 混合检索知识库（BM25 + 向量 + RRF） |
+| `search_knowledge` | 检索知识库（走向量 + RRF + 精排；BM25 可按权重启用） |
 | `add_knowledge` | 添加文本到知识库 |
 | `load_file_to_knowledge` | 加载文件到知识库 |
 
@@ -140,7 +158,9 @@ curl -N -X POST http://localhost:8000/chat/stream \
 | API | FastAPI + Uvicorn |
 | 数据库 | SQLite |
 | 向量库 | Chroma |
-| 检索 | BM25（jieba 分词）+ 向量 + RRF 融合 |
+| 检索 | 稠密向量（Chroma · cosine）+ BM25（jieba 分词）+ RRF 融合 |
+| 精排 | bge-reranker-v2-m3 交叉编码（硅基流动 API；失败自动降级为粗排顺序） |
+| 数据清洗 | 自实现四步清洗（归一化 / 页眉页脚 / 硬换行合并 / 垃圾块过滤） |
 | Embedding | 硅基流动 API（默认） / Ollama 本地模型（离线可选） |
 | 多模态解析 | RapidOCR 本地 OCR（图片直读 + 扫描版 PDF 识别） |
 | 视觉模型 | Ollama minicpm-v 等（命中图片块时真·看图，可选） |
@@ -153,10 +173,27 @@ curl -N -X POST http://localhost:8000/chat/stream \
 
 ## 🔍 RAG 管线
 
+**索引侧（离线，文档入库时跑一次）**
+
 ```
-用户提问 → 分块 → ┬── BM25（jieba 分词）─┐
-                  └── 稠密向量语义检索 ────┴─→ RRF 融合 → LLM 生成答案 + 引用来源
+文档 → 解析（PyMuPDF / python-docx / RapidOCR）
+     → 清洗（归一化 · 跨页页眉页脚去除 · 硬换行合并 · 垃圾块过滤）
+     → 分块（滑窗 500 字 / 重叠 50 字，过短碎块并入相邻块）
+     → 嵌入（bge-large-zh-v1.5，1024 维；分批 64 条 + 指数退避重试）
+     → 入库（Chroma，cosine 空间；同来源文件重传自动替换旧块）
 ```
+
+**检索侧（在线，每次提问跑一次）**
+
+```
+提问 → ┬── BM25（jieba 分词）─┐
+       └── 稠密向量语义检索 ───┴─→ RRF 融合 → 候选池 50 条
+                                              → bge-reranker-v2-m3 精排
+                                              → top 5 拼上下文
+                                              → LLM 生成答案 + 引用来源
+```
+
+> ⚠️ 当前 `BM25_WEIGHT=0`：A/B 测试显示本语料下纯向量优于混合检索，因此 BM25 一路处于短路状态，RRF 实际只收到向量单路排名（排序上等价于按向量排名）。混合检索代码完整保留，调整权重即可启用。
 
 ---
 
@@ -209,14 +246,16 @@ OLLAMA_EMBED_MODEL=nomic-embed-text
 - **可复现**：面板选知识库 → 跑 RAGAS / 配置对比，数字能重新得到。
 - **手写 Judge 对照**：另保留自实现四维 LLM Judge（与 RAGAS 同方法论），可交叉验证。
 
-示例结果（公开文档库 16 chunk · 10 题测试集 · 实时测得）：
+示例结果（公开文档库 `f99c2c78` · 10 题测试集 · 2026-08-02 测得，存档见 `data/eval_history/eval_20260802_191741.json`）：
 
 | 配置 | Context Precision | Context Recall | Faithfulness | Answer Relevancy |
 |------|:---:|:---:|:---:|:---:|
 | top_k=3 | 47.5% | 25.0% | 55.6% | 39.5% |
 | top_k=5 | 47.0% | 25.0% | 59.3% | 37.9% |
 
-> ⚠️ 数字取决于「测试集 ↔ 知识库内容」的匹配度：库里没有的题，Context Recall 会诚实地归零（如 RRF 相关题在示例里是 0）。评估衡量的是「给定这个库，检索 + 回答好不好」，而非固定分数——换个匹配的知识库/测试集即可重新测得。
+> 该批次早于数据清洗与交叉编码精排上线，此处仅用于展示指标口径与「配置对比」的形式；**当前配置的指标请在 Demo 的「评估面板」实时测得**。
+>
+> ⚠️ 数字取决于「测试集 ↔ 知识库内容」的匹配度：库里没有的题，Context Recall 会诚实地归零（如 RRF 相关题在示例里是 0）。评估衡量的是「给定这个库，检索 + 回答好不好」，而非固定分数——换个匹配的知识库/测试集即可重新测得。同理，测试集越小数字越容易失真（同一批问题在 5 题测试集上曾测出 100% 的 Context Recall），这也是本项目坚持留存全部历史存档的原因。
 
 ---
 
@@ -233,7 +272,7 @@ Agent 每次调用的完整链路自动上报到 Langfuse Cloud，
 
 - LangGraph `graph.stream()` 挂 `CallbackHandler`，一次调用自动产生 `call_model / call_tools` 两类 span。
 - RAG 主流程用 `@observe` 装饰 `rag_query / generate_answer`，自动捕获函数输入输出和延迟。
-- LLM 客户端切换 `langfuse.openai`，Token 消耗与延迟直接进面板。
+- **不使用 `langfuse.openai` 客户端**：它会全局 patch openai 客户端、干扰 RAGAS 评测（部分环境还会导入即崩）。Token 与延迟统一由 `@observe` 捕获。
 
 ---
 
@@ -241,31 +280,49 @@ Agent 每次调用的完整链路自动上报到 Langfuse Cloud，
 
 ```
 dev-agent/
-├── app.py                        # Streamlit Web 入口
-├── pages/                        # 知识库管理 / 文档上传 / 智能问答 / 评估面板
+├── app.py                        # Streamlit Web 入口（冷启动自动补演示知识库）
+├── pages/                        # 4 个页面：知识库管理 / 文档上传 / 智能问答 / 评估面板
 ├── src/
-│   ├── agent/                    # v1-v4 四个版本的 Agent 实现
-│   ├── tools/                    # 文件工具 / 安全审查 / 混合检索
-│   ├── api/server.py             # FastAPI 服务
-│   ├── mcp_server.py             # MCP 协议工具服务器
-│   ├── database.py               # SQLite 数据库
-│   ├── parser.py / chunker.py    # 文档解析与分块
-│   ├── vector_store.py           # Chroma 向量存储
-│   ├── rag_agent.py              # RAG 问答 Agent
-│   ├── hybrid_retriever.py       # 混合检索（BM25 + 向量 + RRF）
-│   └── query_cache.py            # 语义缓存（重复问题秒回）
-├── scripts/                      # 运维脚本（seed.py 预置演示知识库）
-├── knowledge/                    # 知识库文档
+│   ├── config.py                 # 配置中枢（所有开关集中在此，环境变量可覆盖）
+│   ├── parser.py                 # 文档解析（PDF / docx / txt / md / 图片 OCR）
+│   ├── cleaner.py                # 数据清洗四步流水线
+│   ├── chunker.py                # 分块（滑窗 + 标题树两种策略 + 碎块合并）
+│   ├── embeddings.py             # 嵌入层（分批 / 重试 / 查询侧编码；云端与本地双后端）
+│   ├── vector_store.py           # Chroma 向量存储（增删改查、按来源删除）
+│   ├── reranker.py               # 交叉编码精排（bge-reranker-v2-m3）
+│   ├── hybrid_retriever.py       # 混合检索（向量 + BM25 + RRF 融合）
+│   ├── rag_qa.py                 # 线上 Web 问答主链路（检索 → 拼上下文 → 生成 → 引用）
+│   ├── query_cache.py            # 语义缓存（重复/相似问题秒回，向量方案变更自动失效）
+│   ├── database.py               # SQLite 元数据（知识库 / 文档）
+│   ├── evaluation_ragas.py       # RAGAS 四维评估（0-100 百分制）
+│   ├── evaluation.py             # 手写 LLM Judge 对照实现（与 RAGAS 同方法论）
+│   ├── mcp_server.py             # MCP 协议工具服务器（FastMCP）
+│   ├── agent/
+│   │   └── dev_agent_langgraph.py  # LangGraph 工具循环 Agent（HTTP API 路径）
+│   ├── api/server.py             # FastAPI 服务（/chat、/chat/stream）
+│   └── tools/
+│       ├── file_tools.py         # list_files / read_file / search_in_files
+│       └── safety.py             # 三层安全审查（黑名单 → 敏感文件 → 白名单）
+├── scripts/                      # 运维脚本
+│   ├── seed.py                   # 预置演示知识库（幂等，冷启动自动调用）
+│   ├── build_eval_kb.py          # 构建检索评测语料库
+│   └── eval_retrieval.py         # 检索评测（Recall@K / Hit@K / Hit@1 / MRR）
+├── tests/                        # 12 个测试文件（清洗 / 分块 / 精排 / 嵌入 / 删除一致性 / 安全 …）
+├── knowledge/                    # 知识库样例文档
+├── notes/                        # 设计与审查笔记（RAG 六环节、MaxKB 对标、工程审查）
+├── ingest_missing.py             # 一次性补数据脚本
+├── run_eval_experiment.py        # 评估实验脚本
 ├── Dockerfile + docker-compose.yml
-└── requirements.txt
+└── requirements.txt / requirements-dev.txt
 ```
 
 ---
 
 ## ⚠️ 已知问题
 
-- Python 3.13 与 sentence-transformers 存在兼容问题，本地需 Python 3.11
-- Docker 环境统一用 Python 3.11
+- **Docker 只起 API**：`docker-compose.yml` 目前只映射并启动 FastAPI（8000），未包含 Web 服务；且其中挂载了开发者本机的桌面路径（`C:/Users/24162/Desktop:/app/host-desktop`），在别的机器上需自行调整。
+- **Python 版本标注不一致**：`Dockerfile` 用 `python:3.11-slim`，`runtime.txt` 声明 `3.13.0`（供 Streamlit Cloud 使用）。两者用途不同，但本地开发建议与 Dockerfile 对齐用 3.11。
+- **`.docx` 表格内容未入库**：`parser.parse_docx()` 目前只读取正文段落（`doc.paragraphs`），文档中表格内的文字（`doc.tables`）不会被解析，且不会有任何提示。
 
 ---
 

@@ -3,7 +3,7 @@
 """
 import streamlit as st
 from src.database import list_kbs, get_kb_stats
-from src.rag_agent import stream_rag_query, extract_cited_sources
+from src.rag_qa import stream_rag_query, extract_cited_sources
 from src.config import TOP_K_RETRIEVE
 
 st.set_page_config(page_title="智能问答 - DataLens", page_icon="💬")
