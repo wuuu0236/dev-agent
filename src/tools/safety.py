@@ -131,7 +131,15 @@ def check_path_safety(path: str) -> tuple[bool, str]:
     # 注意：无条件检查，不是"文件存在才查"。否则 Agent 往任意非系统目录写一个
     # 新文件（如 C:\ProgramData\x.bat，原本不存在）会绕过整个白名单。
     if not any(_path_within(abs_path, d) for d in ALLOWED_DIRS):
-        return False, f"路径不在允许范围内，仅允许访问用户目录和项目目录"
+        # 报错必须带上是「哪个路径」被拒。本函数其他三条拒绝信息都带上下文
+        # （118 带原路径 / 123 带命中的危险目录 / 128 带命中的敏感词），只有这条原先
+        # 只说"不在允许范围内"。Agent 拿到的是一句无法自纠的话——不知道该改哪个参数，
+        # 只能原地重试或放弃。带上被拒的绝对路径 + 允许范围，它就能自己改道。
+        # （绝对路径而非入参：入参可能是 `a/../b` 这类，规范化后的才对得上判断依据。）
+        return False, (
+            f"路径不在允许范围内: {abs_path}；"
+            f"仅允许访问: {'、'.join(ALLOWED_DIRS)}"
+        )
 
     return True, ""
 

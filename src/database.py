@@ -14,7 +14,7 @@ SQLite 数据库：知识库和文档的元数据管理
 import sqlite3
 import uuid
 from datetime import datetime
-from pathlib import Path
+
 from src.config import DB_PATH
 
 

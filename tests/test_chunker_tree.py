@@ -1,6 +1,4 @@
 """标题树分块测试（对标 MaxKB 的 parent_chain 做法）"""
-import pytest
-
 from src.chunker import (
     _parse_sections,
     _common_prefix,

@@ -21,7 +21,6 @@
   python scripts/eval_retrieval.py --kb <kb_id>
 """
 import argparse
-import os
 import sys
 from pathlib import Path
 

@@ -7,7 +7,6 @@
 实测基线（修复前，2×2 + 3×3 两张表 / 7 个关键值）：
     返回块 1 个，长度 51，7 个关键值全部 False
 """
-import pytest
 from docx import Document
 
 from src.parser import _table_to_text, parse_docx, parse_file

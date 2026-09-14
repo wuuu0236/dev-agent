@@ -328,7 +328,7 @@ def _run_with_guard(fn, *a, **kw):
     except Exception as e:
         msg = str(e)
         if "dimension" in msg.lower() or "embedding" in msg.lower():
-            st.error(f"❌ 知识库 embedding 维度与当前模型不匹配（详见上方提示）。请用当前模型重新上传文档。")
+            st.error("❌ 知识库 embedding 维度与当前模型不匹配（详见上方提示）。请用当前模型重新上传文档。")
         else:
             st.error(f"❌ 评估失败: {type(e).__name__}: {msg}")
         return None

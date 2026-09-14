@@ -132,6 +132,23 @@ def test_new_file_outside_blocked(sandbox):
     assert "允许范围" in reason
 
 
+def test_whitelist_rejection_says_which_path_and_where_is_allowed(sandbox):
+    """拒绝信息必须能自纠：说清是「哪个路径」被拒 +「哪里可以去」。
+
+    这条消息的读者是 Agent，不是人。只说"不在允许范围内"——它不知道该换哪个参数，
+    只能原地重试或干脆放弃；把白名单一并给它，它就能自己改道。这是唯一的自纠依据。
+    （原先这句话就是个没有占位符的 f-string，是被静态检查扫出来的。）
+    """
+    tmp, allow, _ = sandbox
+    target = tmp / "outside.txt"
+    ok, reason = safety.check_path_safety(str(target))
+    assert not ok
+    # 被拒路径：代码返回的是规范化后的绝对路径，按同样方式算一遍再比
+    assert os.path.abspath(os.path.realpath(str(target))) in reason
+    # 允许范围：代码直接 join ALLOWED_DIRS 原值（未规范化），故用原值比对
+    assert str(allow) in reason
+
+
 def test_path_traversal_normalized(sandbox):
     """路径穿越：allow/../../outside.txt 想借 .. 逃出沙箱，realpath 规范化后仍在白名单外。"""
     _, allow, _ = sandbox

@@ -9,13 +9,12 @@ Collection 命名规则：kb_{kb_id}
   - metadatas: {source, page, chunk_index} 用于显示引用
   - ids: chunk_{source}_{chunk_index} 唯一标识
 """
-import shutil
 import sys
 
 import chromadb
 from chromadb.config import Settings
 from src.config import CHROMA_DIR, EMBEDDING_DIM
-from src.embeddings import embed_texts, embed_single, embed_query
+from src.embeddings import embed_texts, embed_query
 
 
 _client = None  # 单例缓存（chromadb 1.x 里 PersistentClient 是工厂函数，不做类型注解）
@@ -226,7 +225,6 @@ def check_embedding_dim(kb_id: str) -> tuple[bool, str]:
     不一致说明这个库是用旧模型建的（如 text2vec 768 维），当前 bge-large 1024 维
     检索时会抛 dimension 错误。返回 (是否兼容, 提示)。
     """
-    from src.config import EMBEDDING_DIM
     try:
         collection = _get_client().get_collection(_collection_name(kb_id))
         got = collection.get(limit=1, include=["embeddings"])

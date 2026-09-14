@@ -23,8 +23,10 @@ RAG 问答主链路（确定性管道，**非 Agent**）
       · grounded=False（contexts 也为空）表示检索未达阈值，answer 是不依赖知识库的兜底回答
       · log_ref 是可变容器 {"id": ...}：流式下返回时生成器还没跑，答案与日志 id
         都要等 st.write_stream 跑完才能取到，只有容器能穿透（见 src/answer_log.py）
-  extract_cited_sources(answer, contexts) -> [{source, page, type, snippets}]
-      · 已迁至 `src/citations.py`（此处仅保留导入），好让引用逻辑脱离 langfuse 单独测试
+  extract_cited_sources -> 见 `src/citations.py`
+      · 迁出是为了让引用逻辑能脱离 langfuse 单独测试。需要它就**直接从 src.citations 导入**
+        —— 这里不再留转发（原先那句 re-export 的注释写着「保持老路径可用」，但加它的
+        同一次提交 5e05dae 就把唯一的调用方 test_citations 改到了新路径，它从未被人用过）
   backend / vision_model 不传则读 config，保证已部署的云端 Demo 行为不变。
 
 问答现场快照（反馈环 P0，见 src/answer_log.py）：
@@ -50,7 +52,6 @@ from src.query_rewrite import rewrite_query
 from src.answer_gate import is_grounded, top_score
 # 引用来源整理（按文档去重 + 附命中原文，让引用可核实）
 from src import citations
-from src.citations import extract_cited_sources  # re-export：保持 from src.rag_qa 的老路径可用
 # 问答现场快照（反馈环 P0）：旁路写入，纯 stdlib 无重依赖，可顶层 import
 from src import answer_log
 

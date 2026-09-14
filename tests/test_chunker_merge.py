@@ -8,8 +8,6 @@
 monkeypatch CHUNK_SIZE 对它们无效。所以端到端用例按真实默认值（500/50）
 构造数据，只有 chunk_parsed 内部引用的 CHUNK_MIN_SIZE 可以被 monkeypatch。
 """
-import pytest
-
 from src import chunker
 from src.chunker import merge_tiny_chunks, chunk_parsed
 

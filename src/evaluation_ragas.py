@@ -22,7 +22,6 @@ RAGAS 评估器 —— 用业界标准框架（ragas）跑四维指标，输出 
 """
 import os
 import json
-import time
 import glob
 from datetime import datetime
 from dotenv import load_dotenv

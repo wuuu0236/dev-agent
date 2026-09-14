@@ -8,6 +8,7 @@
   给它塞替身等于把这个测试变成空转。所以只给明确需要它、且测的不是降级行为的
   文件用（显式声明依赖，不隐式生效）。
 """
+import importlib
 import importlib.machinery
 import sys
 import types
@@ -43,6 +44,10 @@ def stub_langfuse():
     """
     if "langfuse" not in sys.modules:
         try:
-            import langfuse  # noqa: F401
+            # 用 `importlib.import_module` 而不是 `import langfuse`：这里要的只是
+            # 「装了没有」这个事实，名字本身不会被用到。写成 import 语句的话静态检查
+            # 会把 `# noqa` 之外的一切都报成未使用导入——而 pyflakes 根本不认 noqa
+            # （那是 flake8 的功能），于是每次全仓扫描都留一条假告警。
+            importlib.import_module("langfuse")
         except ImportError:
             _make_stub()
