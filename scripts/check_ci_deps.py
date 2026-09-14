@@ -49,6 +49,7 @@ def main() -> int:
     print(f"解释器 {sys.executable}\n")
 
     failed: list[str] = []
+    errs: dict[str, str] = {}
     print(f"{'模块':<18} {'发行包版本':<16} 结果")
     print("-" * 66)
     for mod, dist in CORE.items():
@@ -56,14 +57,21 @@ def main() -> int:
             importlib.import_module(mod)
             print(f"{mod:<18} {_version(dist):<16} OK")
         except Exception as e:  # 不只是 ImportError：装上了也可能导入期崩
-            print(f"{mod:<18} {_version(dist):<16} FAIL  {type(e).__name__}: {e}")
+            msg = f"{type(e).__name__}: {e}"
+            print(f"{mod:<18} {_version(dist):<16} FAIL  {msg}")
             failed.append(mod)
+            errs[mod] = msg
 
     print()
     if failed:
         print("❌ 以下依赖在本环境不可用：" + ", ".join(failed))
         print("   若是 ModuleNotFoundError → requirements-dev.txt 漏声明；")
         print("   若是别的异常 → 装上了但版本组合不兼容，看上面的版本号。")
+        # 发一条 GitHub annotation：job 日志走 API 要鉴权（403），
+        # 而 check-run 的 annotations 是**匿名可读**的 —— 这是没装 gh、也无法登录时
+        # 唯一能看到失败原文的通道。%0A 是工作流命令里的换行转义。
+        detail = "%0A".join(f"{m} ({_version(CORE[m])}): {errs[m]}" for m in failed)
+        print(f"::error title=CI 依赖自检失败::{detail}")
         return 1
     print("✅ 核心依赖全部可导入")
     return 0

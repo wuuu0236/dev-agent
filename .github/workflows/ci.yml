@@ -57,5 +57,22 @@ jobs:
       - name: 依赖自检
         run: python scripts/check_ci_deps.py
 
+      # 为什么要把失败摘要转成 annotation：
+      #   job 日志走 API 需要鉴权（403），本机没有 gh、也登不上时，CI 一红就完全瞎了
+      #   —— 2026-09-14 排查那个"红了一个月的 test job"时，全程只能看到
+      #   `Process completed with exit code 2.` 一句。而 **check-run 的 annotations
+      #   是匿名可读的**，把关键行塞进 annotation 就有原文了。
+      #   （`%0A` 是工作流命令里的换行转义，`%` 本身要转义成 `%25`。
+      #   ⚠️ 拼接时不要用 `paste -d'%0A'`：`-d` 收的是**分隔符列表并轮换使用**，
+      #   `%0A` 会被当成 `%`、`0`、`A` 三个分隔符轮流插入，注解被拼坏。用 awk。）
       - name: 跑冒烟测试
-        run: python -m pytest tests/ -v
+        run: |
+          set +e
+          python -m pytest tests/ -v 2>&1 | tee pytest.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            summary=$(grep -E "^(ERROR|FAILED|E   |_{5,}|!+ )" pytest.log \
+                      | head -30 | sed 's/%/%25/g' | awk 'NR>1{printf "%%0A"}1' | tr -d '\n')
+            echo "::error title=pytest 退出码 $code::${summary}"
+          fi
+          exit $code
