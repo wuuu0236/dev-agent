@@ -30,6 +30,11 @@
   - 50 字大约覆盖一个句子的末尾 + 下一个句子的开头
 
 可用 CHUNK_TREE_ENABLED=false 退回纯滑窗做 A/B 对比。
+
+碎块合并（两种策略共用，收口在 chunk_parsed）：
+  滑窗的尾块、标题树末尾的短章节，都可能只剩几十个字。这类碎块语义不完整，
+  检索时容易误命中，还白占一个候选位。长度 < CHUNK_MIN_SIZE（默认 120）的块
+  会并入前一块（首块则并入后一块）。设 0 可关闭。
 """
 import re
 
@@ -242,6 +247,41 @@ def chunk_document(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK
     return split_text(text, chunk_size, overlap)
 
 
+def merge_tiny_chunks(chunks: list[str], min_size: int = CHUNK_MIN_SIZE) -> list[str]:
+    """把过短的 chunk 并入相邻块，消掉"只有一两句话"的孤立碎块。
+
+    碎块从哪来：
+      · 滑窗的尾块——切到文末时剩下多少就是多少，可能只剩几十个字
+      · 标题树里最后一个短章节——打包逻辑只负责"累计到 500"，末尾不满也照样成块
+
+    为什么必须处理：
+      1. 碎块语义不完整，检索时容易误命中——"循环一直持续"这种半截句子
+         放在哪个问题下看都像相关，会挤掉真正完整的那一块
+      2. 白白占用一个候选位，等于提高了召回难度
+
+    合并方向选"并入前一块"而非后一块：前一块通常是同一章节的延续，
+    语义上更近；且拼完仍保持自然阅读顺序。
+
+    首块本身过短时没有"前一块"可并，改为往后并。
+    """
+    if min_size <= 0 or len(chunks) <= 1:
+        return chunks
+
+    out: list[str] = []
+    for c in chunks:
+        if out and len(c) < min_size:
+            out[-1] = f"{out[-1]}\n{c}"
+        else:
+            out.append(c)
+
+    # 首块过短 → 只能往后并
+    if len(out) >= 2 and len(out[0]) < min_size:
+        out[1] = f"{out[0]}\n{out[1]}"
+        out.pop(0)
+
+    return out
+
+
 # ---------------------------------------------------------------- 对外主入口
 
 
@@ -256,6 +296,8 @@ def chunk_parsed(parsed_docs: list[dict]) -> list[dict]:
     chunks = []
     for doc in parsed_docs:
         text_parts = chunk_document(doc["text"])
+        # 收口在这里做碎块合并：两种策略（标题树/滑窗）都经过本函数，一处生效
+        text_parts = merge_tiny_chunks(text_parts, CHUNK_MIN_SIZE)
         doc_type = doc.get("type", "text")
         doc_image = doc.get("image")
         for i, part in enumerate(text_parts):
