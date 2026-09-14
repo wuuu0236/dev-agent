@@ -84,11 +84,15 @@ Web 问答路径还带**语义缓存**（`src/query_cache.py`）：无历史的�
 ```bash
 conda activate dev-agent   # 推荐用项目独立环境（Python 3.11，与 Dockerfile 一致）
 pip install -r requirements.txt
-cp .env.example .env    # 填入你的 DEEPSEEK_API_KEY
+cp .env.example .env    # ⚠️ 要填两个 key：DEEPSEEK_API_KEY + EMBEDDING_API_KEY（硅基流动）
 streamlit run app.py
 # 浏览器打开 http://localhost:8501
 # 首次启动自动预置「DataLens 演示」知识库（scripts/seed.py），打开即可直接问答
 ```
+
+> ⚠️ **两个 key 都要填，不能只填一个。** LLM 走 DeepSeek、Embedding 与精排走硅基流动，
+> **两家 key 不通用**。只填 `DEEPSEEK_API_KEY` 时，`EMBEDDING_API_KEY` 会回退成它去请求
+> 硅基流动，**必然 401**，且报错信息不会指向这个原因（守卫测试：`tests/test_env_example.py`）。
 
 ### 方式二：HTTP API（FastAPI）
 
@@ -318,7 +322,7 @@ dev-agent/
 │   ├── seed.py                   # 预置演示知识库（幂等，冷启动自动调用）
 │   ├── build_eval_kb.py          # 构建检索评测语料库
 │   └── eval_retrieval.py         # 检索评测（Recall@K / Hit@K / Hit@1 / MRR）
-├── tests/                        # 18 个测试文件（首页文案一致性 / 表格解析 / 清洗 / 分块 / 混合检索融合 / 精排 / 追问改写 / 质量门控 / 引用 / 重建索引 / 嵌入 / 删除一致性 / 安全 …）
+├── tests/                        # 19 个测试文件（首页文案一致性 / 环境变量模板一致性 / 表格解析 / 清洗 / 分块 / 混合检索融合 / 精排 / 追问改写 / 质量门控 / 引用 / 重建索引 / 嵌入 / 删除一致性 / 安全 …）
 ├── knowledge/                    # 知识库样例文档
 ├── docs/                         # 正式文档（产品设计方案、面试速记）
 ├── notes/                        # 设计与审查笔记（RAG 六环节、MaxKB 对标、工程审查、反馈环方案）
