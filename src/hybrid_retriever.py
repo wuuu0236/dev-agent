@@ -18,9 +18,37 @@ from rank_bm25 import BM25Okapi
 # 也保证 CI 冒烟测试无需安装 chromadb。
 from src.config import TOP_K_RETRIEVE, BM25_WEIGHT, VECTOR_WEIGHT, RETRIEVE_CANDIDATES
 
+# 中文高频虚词（停用词）。只收「几乎每句话都有、本身不指示任何内容」的词：
+# 助词 / 语气词 / 代词 / 指代词 / 轻动词。
+#
+# 刻意**不收**疑问词（什么、怎么、如何、为什么、哪些）：它们标记的是"问法"
+# 而不是内容，留着不碍事，收进来反而容易误伤。
+# 原则：宁可少收、不可多收——这份表唯一的作用是把噪声挤出查询词表，
+# 挤多了就是自己削自己的召回。
+#
+# 为什么不引第三方停用词表：完整表上千词，而 BM25 的 IDF 本身已经能压制
+# 语料内的高频词（词出现在半数以上文档时 IDF 会被夹到极小值）。这里只需要
+# 处理「短查询里虚词权重占比过高」这一个具体问题。
+_STOPWORDS = frozenset({
+    # 助词 / 连词 / 介词
+    "的", "了", "是", "在", "和", "与", "或", "也", "都", "就", "而", "及",
+    "着", "过", "得", "地", "并", "且", "但", "为", "从", "对", "由",
+    # 语气词
+    "吗", "呢", "吧", "啊", "呀", "哦", "嗯", "啦", "嘛",
+    # 代词
+    "我", "你", "他", "她", "它", "我们", "你们", "他们", "它们", "自己",
+    # 指代词 / 泛指量词
+    "这", "那", "这个", "那个", "这些", "那些", "一个", "一些", "一下",
+    # 轻动词（本身不含检索信息）
+    "有", "没有", "会", "能", "可以", "要", "把", "被", "给", "让",
+    # 英文功能词
+    "a", "an", "the", "of", "to", "is", "are", "was", "were",
+    "and", "or", "not", "in", "on", "at", "for", "with", "by", "as",
+})
+
 
 def _tokenize(text: str) -> list[str]:
-    """中文分词：用 jieba 做词语级切分。
+    """中文分词：用 jieba 做词语级切分，并滤掉对检索无意义的 token。
 
     为什么不用按字切分：
       "什么是混合检索" → 按字切: ["什","么","是","混","合","检","索"]
@@ -28,8 +56,30 @@ def _tokenize(text: str) -> list[str]:
 
       "什么是混合检索" → jieba: ["什么","是","混合","检索"]
       → 搜"检索"能精确匹配到"检索"这个词，BM25 才有真正的关键词能力
+
+    为什么还要过滤（两层噪声）：
+      1. jieba 会把标点和空白也切出来（"，" "？" "\n"）。这种 token 在库里
+         几乎随处可见，是纯噪声。
+      2. "的 / 了 / 是 / 都 / 可以" 这类高频虚词，BM25 的 IDF 本来就会把它们
+         压到接近 0。但短查询里实词就那么两三个，虚词仍会分走一部分打分权重；
+         滤掉后「专有名词/数字/术语」占比更高，词面匹配更锐。
+    说明：统一转小写，让 "Dockerfile" / "dockerfile" 算同一个词——
+    BM25 是词面匹配，大小写不该被当成不同词。
     """
-    return list(jieba.cut(text))
+    tokens = []
+    for t in jieba.cut(text):
+        t = t.strip().lower()
+        if not t or t in _STOPWORDS:
+            continue
+        # 必须至少含一个字母或数字，否则丢掉。
+        # 注意这里**不能**写成 `ch.isalnum() or ch == "_"`：jieba 会把
+        # "hybrid_retriever" 切成 ["hybrid", "_", "retriever"]，那个孤立的
+        # 下划线就会被放行成一个 token。而分词是**文档侧和查询侧同一套规则**，
+        # 所以拆成两半不影响匹配（文档里的 hybrid_retriever 也拆成同样两半）。
+        if not any(ch.isalnum() for ch in t):
+            continue
+        tokens.append(t)
+    return tokens
 
 
 # --- BM25 索引缓存（模块级，跨实例共享）---
@@ -44,10 +94,9 @@ _bm25_cache: dict[str, tuple[int, BM25Okapi | None, list[dict]]] = {}
 def _get_bm25(kb_id: str) -> tuple[BM25Okapi | None, list[dict]]:
     """按 kb_id 取（BM25 索引, 全量 chunk），有增删时自动重建。
 
-    BM25 权重为 0 时（config.BM25_WEIGHT=0，即当前配置）直接短路：
-    建索引要从 Chroma 拉全量 chunk 再逐条分词，成本不低，而融合时
-    贡献是 0/(60+rank)=0——纯属白算。想恢复混合检索，把权重调回 1 即可，
-    这里会自动重新启用。
+    BM25_WEIGHT 为 0 时直接短路（当前默认值见 config.py）：建索引要从 Chroma
+    拉全量 chunk 再逐条 jieba 分词，成本不低，而融合时贡献是 0/(60+rank)=0
+    ——纯属白算。把 BM25_WEIGHT 调成 1 即可恢复混合检索，这里会自动重新启用。
     """
     if BM25_WEIGHT == 0:
         return None, []
@@ -110,7 +159,14 @@ class HybridRetriever:
         bm25_mapped = []
         if bm25 is not None:
             scores = bm25.get_scores(_tokenize(query))
-            indexed = list(enumerate(scores))
+            # 只保留与查询有词面重叠的块（score > 0）。
+            # 为什么不能直接取 top candidate_k：BM25 对"一个词都没对上"的块也返回
+            # 0 分，按分数排序时这些 0 分块会顶上来凑满候选池。它们没有带来任何
+            # 新信息，却会让精排多送一批文档——精排是按文档条数计费的，
+            # 这是纯浪费。宁可池子小一点、每一条都言之有物。
+            # 反过来也正合语义：查询与全库毫无词面重叠时，BM25 本来就不该有发言权，
+            # 这一路交给向量去管。
+            indexed = [(i, s) for i, s in enumerate(scores) if s > 0]
             indexed.sort(key=lambda x: x[1], reverse=True)
             for rank, (idx, score) in enumerate(indexed[:candidate_k], start=1):
                 chunk = chunks[idx]
@@ -155,8 +211,19 @@ class HybridRetriever:
                     "rrf_score": bm25_contrib
                 }
 
-        # 按 RRF 分数从高到低排序（粗排完成，候选池 size = candidate_k）
-        sorted_results = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)
+        # 按 RRF 分数从高到低排序，并**截断回候选池大小**（粗排完成）
+        #
+        # 为什么必须截断：RRF 只是把各路排名加起来，它本身不设上限——
+        # 再加一路召回，融合结果就再长一截。而精排是**按文档条数计费**的
+        # （每条候选都要单独过一遍交叉编码模型），不截断就等于"多开一路召回
+        # 顺手把精排账单也加上去"。截断之后，精排的开销只由候选池大小决定，
+        # 与开了几路召回无关——这才是「粗排 → 精排」这个架构里"池子有固定预算"
+        # 的正确含义。
+        #
+        # 注意这不是简单的"砍掉尾巴"：截断发生在**融合之后**，所以两路都排得靠前
+        # 的块会被顶上来，把只有一路支持的低分块挤出去。这正是 RRF 想要的效果——
+        # 用有限的预算装下"多路共识"的候选。
+        sorted_results = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)[:candidate_k]
 
         # --- Rerank 精排（交叉编码）---
         # 失败会自动降级为「粗排顺序的前 top_k」，不会打断问答链路

@@ -185,13 +185,15 @@ def main():
     if args.limit:
         cases = cases[: args.limit]
 
-    # 实际生效的精排开关（None 时读配置），存档里要记下来，否则两次结果没法归因
-    from src.config import RERANK_ENABLED
+    # 实际生效的检索配置（None 时读配置），存档里要记下来，否则两次结果没法归因
+    from src.config import BM25_WEIGHT, RERANK_ENABLED, VECTOR_WEIGHT
     rerank_effective = RERANK_ENABLED if args.rerank is None else args.rerank
+    routes = "向量" + (f" + BM25(权重 {BM25_WEIGHT:g})" if BM25_WEIGHT else "（BM25 关）")
 
     print(f"加载测试集: {args.golden}")
     print(f"用例数 {len(cases)} | 知识库 {kb_id} | top_k={args.top_k} | "
-          f"精排={'开' if rerank_effective else '关'}")
+          f"精排={'开' if rerank_effective else '关'} | 召回: {routes}")
+    print(f"  提示：切 BM25 做 A/B 用环境变量，例如 BM25_WEIGHT=0 python {Path(__file__).name} --no-archive")
 
     result = evaluate(kb_id, cases, args.top_k, args.verbose, rerank=args.rerank)
     print_table(result, args.top_k, kb_id, kb_name, rerank_effective)
@@ -221,6 +223,8 @@ def main():
             "kb_name": kb_name,
             "top_k": args.top_k,
             "rerank": rerank_effective,
+            "bm25_weight": BM25_WEIGHT,
+            "vector_weight": VECTOR_WEIGHT,
             "golden_set": str(args.golden),
             **result,
         }
