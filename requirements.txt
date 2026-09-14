@@ -33,6 +33,9 @@ pillow>=10.0.0
 # --- API 服务 ---
 fastapi>=0.100.0
 uvicorn>=0.20.0
+# python-multipart：FastAPI 解析 multipart/form-data 必需（文件上传端点用到），
+# 缺了会在定义 UploadFile 路由时直接抛 RuntimeError，而不是等到运行时
+python-multipart>=0.0.9
 # 锁 mcp 1.x：代码用 from mcp.server.fastmcp import FastMCP，2.0 移除了该 API
 mcp>=1.0.0,<2.0.0
 

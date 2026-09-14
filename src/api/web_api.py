@@ -1,0 +1,231 @@
+"""
+Web API —— 给 React 前端（frontend/）提供 REST 端点
+
+设计原则：
+  · 这一层**只做协议转换**（HTTP ↔ 现有模块调用），不含任何业务逻辑。
+    检索、门控、解析、入库全部复用 Streamlit 已有的模块，保证两条入口行为一致。
+  · 函数内部 import：任何模块在无 API key 环境下也必须能 import（CI 守卫），
+    而本文件只被 API 服务加载，运行时 import 不影响那条守卫。
+
+端点一览：
+  GET    /api/health                  服务可用性与后端连通状态
+  GET    /api/kbs                     知识库列表（含文档数 / chunk 数）
+  GET    /api/kbs/{kb_id}/docs        某知识库的文档列表
+  POST   /api/ask                     RAG 问答（改写 → 检索 → 精排 → 门控 → 生成 → 引用）
+  POST   /api/kbs/{kb_id}/upload      上传并入库（解析 → 切块 → 嵌入）
+  POST   /api/kbs/{kb_id}/reindex     按当前参数重建索引
+  DELETE /api/docs/{doc_id}           删除文档（SQLite + Chroma 双清）
+  GET    /api/answer_log              问答日志 + 缺口分类
+  GET    /api/eval/history            RAGAS 评估历史存档
+"""
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
+
+router = APIRouter(prefix="/api", tags=["web"])
+
+
+# ================================================================
+# 请求/响应模型
+# ================================================================
+
+class AskRequest(BaseModel):
+    """RAG 问答请求"""
+    kb_id: str = Field(description="知识库 ID")
+    question: str = Field(description="用户问题")
+    top_k: int = Field(default=5, description="进入上下文的 chunk 数")
+    history: list[dict] = Field(
+        default_factory=list,
+        description="此条问题之前的对话历史（不含当前问题），格式 [{role, content}]，最近的在末尾",
+    )
+
+
+class AskResponse(BaseModel):
+    """RAG 问答响应：answer + 引用 + 现场元信息（供前端展示门控/缓存/精排分）"""
+    answer: str
+    grounded: bool = Field(description="是否通过了检索质量门控（False = 如实说没找到）")
+    gate_score: float | None = Field(description="本次检索最高精排分（缓存命中时为 None）")
+    retrieval_query: str = Field(description="实际用于检索的 query（追问时是消解后的自包含问句）")
+    sources: list[dict] = Field(description="引用来源，含命中原文片段")
+    log_id: int | None = None
+
+
+# ================================================================
+# 端点
+# ================================================================
+
+@router.get("/health", summary="健康检查")
+def health():
+    return {"status": "ok", "service": "DataLens Web API"}
+
+
+@router.get("/kbs", summary="知识库列表")
+def get_kbs():
+    from src.database import get_kb_stats, list_kbs
+
+    result = []
+    for kb in list_kbs():
+        stats = get_kb_stats(kb["id"])
+        try:
+            from src.vector_store import collection_count
+
+            indexed = collection_count(kb["id"])
+        except Exception:
+            indexed = 0  # 集合尚未创建（新库没传过文档），不算错误
+        result.append({**kb, **stats,
+                       "doc_count": stats.get("doc_count", 0),
+                       "total_chunks": stats.get("total_chunks", 0),
+                       "indexed_chunks": indexed})
+    return result
+
+
+@router.get("/kbs/{kb_id}/docs", summary="某知识库的文档列表")
+def get_docs(kb_id: str):
+    from src.database import get_kb, get_kb_stats, list_documents
+
+    if not get_kb(kb_id):
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+    return {"kb_id": kb_id, "stats": get_kb_stats(kb_id), "docs": list_documents(kb_id)}
+
+
+@router.post("/ask", response_model=AskResponse, summary="RAG 问答")
+def ask(request: AskRequest):
+    """走与 Streamlit 完全相同的 rag_query 链路，返回答案 + 引用 + 门控信息。"""
+    from src.answer_gate import top_score
+    from src.answer_log import get_answer
+    from src.database import get_kb
+    from src.rag_qa import rag_query
+
+    if not get_kb(request.kb_id):
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {request.kb_id}")
+
+    history = request.history or None
+    result = rag_query(request.kb_id, request.question,
+                       top_k=request.top_k, history=history)
+
+    # 门控未通过时 contexts 已被清空，此时从本次落下的日志里取回门控分数——
+    # 前端要展示「最高精排分 0.28 但没过阈」，这个数只能这么拿。
+    gate_score = top_score(result["contexts"]) if result["contexts"] else None
+    if gate_score is None and result.get("log_id"):
+        log = get_answer(result["log_id"])
+        gate_score = log.get("gate_score") if log else None
+
+    sources = [
+        {"n": i + 1, "file": s["source"], "page": s.get("page", 0),
+         "snippets": s.get("snippets", []), "type": s.get("type", "text")}
+        for i, s in enumerate(result["sources"])
+    ]
+
+    return AskResponse(
+        answer=result["answer"],
+        grounded=result["grounded"],
+        gate_score=gate_score,
+        retrieval_query=result["retrieval_query"],
+        sources=sources,
+        log_id=result.get("log_id"),
+    )
+
+
+@router.post("/kbs/{kb_id}/upload", summary="上传文档并入库")
+async def upload(kb_id: str, file: UploadFile = File(...)):
+    """与「文档上传」页同一条链路：保存原文 → 解析 → 切块 → 嵌入入库。"""
+    from src.chunker import chunk_parsed
+    from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, kb_upload_dir
+    from src.database import add_document, get_kb, update_document_status
+    from src.parser import parse_file
+    from src.vector_store import add_chunks
+
+    if not get_kb(kb_id):
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+
+    name = file.filename or "unnamed"
+    if not any(name.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS):
+        raise HTTPException(status_code=400,
+                            detail=f"不支持的文件类型，允许: {', '.join(ALLOWED_EXTENSIONS)}")
+
+    content = await file.read()
+    size = len(content)
+    if size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"文件超过 {MAX_FILE_SIZE_MB}MB 限制")
+
+    # 原始文件必须留存：它是「重建索引」的唯一素材（改了分块/嵌入参数后要靠它重跑）
+    dest = kb_upload_dir(kb_id) / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+
+    doc_id = add_document(kb_id, name, size)
+    try:
+        parsed = parse_file(str(dest))
+        if not parsed:
+            update_document_status(doc_id, "empty")
+            return {"doc_id": doc_id, "filename": name, "status": "empty",
+                    "message": "没有可提取的文本内容"}
+
+        chunks = chunk_parsed(parsed)
+        if not chunks:
+            update_document_status(doc_id, "empty")
+            return {"doc_id": doc_id, "filename": name, "status": "empty",
+                    "message": "内容太短，无法分块"}
+
+        add_chunks(kb_id, chunks)
+        update_document_status(doc_id, "ready", len(chunks))
+        return {
+            "doc_id": doc_id, "filename": name, "status": "ready",
+            "paragraphs": len(parsed), "chunks": len(chunks),
+            "image_chunks": sum(1 for c in chunks if c.get("type") == "image"),
+        }
+    except Exception as e:
+        update_document_status(doc_id, "error")
+        raise HTTPException(status_code=500, detail=f"{name} 处理失败: {e}")
+
+
+@router.post("/kbs/{kb_id}/reindex", summary="重建索引")
+def reindex(kb_id: str):
+    """用保留的原文按当前分块/嵌入参数重跑全库（src/reindex.py）。"""
+    from src.database import get_kb
+    from src.reindex import rebuild_kb
+
+    if not get_kb(kb_id):
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+    return rebuild_kb(kb_id)
+
+
+@router.delete("/docs/{doc_id}", summary="删除文档")
+def delete_doc(doc_id: str):
+    """SQLite 记录 + Chroma chunk 双清，避免留下「列表里没了、检索还能搜到」的幽灵引用。"""
+    from src.database import delete_document
+    from src.vector_store import delete_chunks_by_source
+
+    doc = delete_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"文档不存在: {doc_id}")
+    deleted = delete_chunks_by_source(doc["kb_id"], doc["filename"])
+    return {"doc_id": doc_id, "filename": doc["filename"], "deleted_chunks": deleted}
+
+
+@router.get("/answer_log", summary="问答日志 + 缺口清单")
+def answer_log_api(kb_id: str | None = None, limit: int = 50):
+    from src.answer_log import gap_stats, list_answers
+
+    return {
+        "kb_id": kb_id,
+        "stats": gap_stats(kb_id),
+        "recent": list_answers(kb_id, limit=limit),
+    }
+
+
+@router.get("/eval/history", summary="RAGAS 评估历史存档（摘要列表）")
+def eval_history():
+    from src.evaluation_ragas import list_history
+
+    return list_history()
+
+
+@router.get("/eval/history/{filename}", summary="加载某一份评估存档的完整结果")
+def eval_history_detail(filename: str):
+    from src.evaluation_ragas import load_history
+
+    data = load_history(filename)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"评估存档不存在: {filename}")
+    return data

@@ -18,8 +18,11 @@ import sys
 import logging
 import io
 from datetime import datetime
+from pathlib import Path
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -49,6 +52,24 @@ app = FastAPI(
         "docExpansion": "list",           # 接口默认展开
     },
 )
+
+# --- Web API + React 前端静态托管 ---
+# 前端是构建好的单文件 HTML（frontend/index.html），与 API 同源部署，
+# 因此用相对路径 /api/... 调接口，不需要额外配置地址。
+from src.api.web_api import router as web_router  # noqa: E402
+
+app.include_router(web_router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],      # 本机服务；也允许直接双击 index.html（file://）调试
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+if _FRONTEND_DIR.is_dir():
+    app.mount("/app", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+    print(f"[Dev Agent API] React 前端已挂载: http://localhost:8000/app")
 
 
 # 请求/响应模型（FastAPI 自动校验 + 生成文档）
@@ -165,6 +186,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print("[Dev Agent API] 启动成功!")
     print("=" * 50)
+    print("React 前端: http://localhost:8000/app")
     print("API 文档: http://localhost:8000/docs")
     print("健康检查: http://localhost:8000/health")
     print("测试命令: curl -X POST http://localhost:8000/chat")
