@@ -36,7 +36,9 @@
 
 ## 🏗️ 架构
 
-**两条入口是两套实现**，分工见下一节。上面是线上演示实际跑的路径（确定性 RAG 管道，无 LangGraph）；下面是 HTTP API 路径（LangGraph 工具循环）。
+**三种入口共用一套检索内核（`HybridRetriever`），其中有两条不同的实现路径**，分工见下一节。上面是线上演示实际跑的路径（确定性 RAG 管道，无 LangGraph）；下面是 HTTP API 路径（LangGraph 工具循环）。
+
+> ⚠️ **只有 Streamlit Web 部署在线上**（[Demo](https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/)）。HTTP API、MCP 工具服务、文件操作 Agent 均**仅在本机运行**——这是设计边界，不是未完成项：Streamlit Cloud 只运行一个 Streamlit 应用（单端口、无常驻进程），放不下需要独立端口的 API 与 stdio 常驻的 MCP；文件 Agent 的工作目录与安全白名单都指向本机（`ALLOWED_DIRS = ["C:\\Users", ...]`），暴露到公网等于开放服务器文件系统。同一份说明见线上首页「运行方式与能力边界」。
 
 **Web 智能问答 — 快路径（确定性 RAG，无 LangGraph）**
 
@@ -61,12 +63,13 @@ flowchart LR
 
 ---
 
-## 🧭 两条入口，一个大脑（分工约定）
+## 🧭 入口分工，一个大脑
 
-| 入口 | 定位 | 能力 |
-|------|------|------|
-| **Web 智能问答**（`pages/3_💬_智能问答.py`） | 知识库问答（纯 RAG，快路径） | 快、带引用来源、6 轮追问上下文 |
-| **HTTP API**（`/chat`、`/chat/stream`） | 文件操作 Agent（LangGraph 工具循环，慢路径） | 文件工具 + 顺手查知识库；历史 / 流式与 RAG 对齐 |
+| 入口 | 定位 | 能力 | 线上 |
+|------|------|------|:----:|
+| **Web 智能问答**（`pages/3_💬_智能问答.py`） | 知识库问答（纯 RAG，快路径） | 快、带引用来源、6 轮追问上下文 | ✅ |
+| **HTTP API**（`/chat`、`/chat/stream`） | 文件操作 Agent（LangGraph 工具循环，慢路径） | 文件工具 + 顺手查知识库；历史 / 流式与 RAG 对齐 | ❌ 本机 |
+| **MCP 工具服务**（`src/mcp_server.py`） | 供 Claude Code / Codex 调用 | `search_user_knowledge` 等 4 个工具 | ❌ 本机 |
 
 关键原则：**知识库问答走 RAG，文件/工具操作走 Agent**，各司其职——而不是把 RAG 也塞进 ReAct 循环，那只会让问答变慢、引用变难。两条路径共用 `HybridRetriever`（检索结果一致），都支持最近 6 轮对话注入（多轮追问不丢上下文）。`/chat/stream` 是**真流式**（按 token 吐），不是跑完再切块的假流式。
 
@@ -315,7 +318,7 @@ dev-agent/
 │   ├── seed.py                   # 预置演示知识库（幂等，冷启动自动调用）
 │   ├── build_eval_kb.py          # 构建检索评测语料库
 │   └── eval_retrieval.py         # 检索评测（Recall@K / Hit@K / Hit@1 / MRR）
-├── tests/                        # 17 个测试文件（表格解析 / 清洗 / 分块 / 混合检索融合 / 精排 / 追问改写 / 质量门控 / 引用 / 重建索引 / 嵌入 / 删除一致性 / 安全 …）
+├── tests/                        # 18 个测试文件（首页文案一致性 / 表格解析 / 清洗 / 分块 / 混合检索融合 / 精排 / 追问改写 / 质量门控 / 引用 / 重建索引 / 嵌入 / 删除一致性 / 安全 …）
 ├── knowledge/                    # 知识库样例文档
 ├── docs/                         # 正式文档（产品设计方案、面试速记）
 ├── notes/                        # 设计与审查笔记（RAG 六环节、MaxKB 对标、工程审查、反馈环方案）

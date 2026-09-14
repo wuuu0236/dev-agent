@@ -43,12 +43,18 @@ st.sidebar.markdown("""
 
 ### 技术栈
 - 🔍 混合检索（BM25 + 向量）
-- 🧠 LangGraph Agent（HTTP API 入口）
 - 📊 RAGAS 评估（业界标准）
 - 🖼️ 多模态 OCR（图片 / 扫描件）
-- 🔒 私有化离线（Ollama 可选）
 - 🗄️ SQLite + Chroma
 - 🚀 Streamlit 部署
+
+### 本机能力（本 Demo 不含）
+- 🧠 LangGraph 文件 Agent
+- 🔌 MCP 工具服务
+- ⚡ HTTP API（FastAPI）
+- 🔒 Ollama 私有化离线
+
+*以上仅本地运行，原因见首页「运行方式与能力边界」*
 """)
 
 # --- 主页 ---
@@ -97,6 +103,49 @@ with col2:
     → 评估面板看数据
     → 5 分钟展示完整能力
     """)
+
+st.divider()
+
+# --- 运行方式与能力边界 ---
+# 为什么要把「做不到什么」写在首页：本项目有三条入口，线上 Demo 只承载第一条。
+# 不写清楚时，读代码/文档的人会把「代码里有」直接等同于「线上能演示」，演示时对不上。
+st.subheader("🧭 运行方式与能力边界")
+
+st.markdown("""
+本项目共 **三条入口**，线上 Demo 只承载第一条。**下表的 ❌ 是设计决定，不是未完成项。**
+
+| 入口 | 如何启动 | 线上 Demo |
+|------|---------|:--------:|
+| 🖥️ **Streamlit Web**（4 个页面） | `streamlit run app.py` | ✅ 即当前页面 |
+| ⚡ **HTTP API**（4 个接口） | `python -m src.api.server` → `:8000/docs` | ❌ 需本机运行 |
+| 🔌 **MCP 工具服务**（4 个工具） | 在 Claude Code / Codex 中配置（stdio） | ❌ 需本机运行 |
+| 🧠 **文件操作 Agent**（LangGraph，6 个工具） | 随 HTTP API 一同启动 | ❌ 需本机运行 |
+""")
+
+with st.expander("为什么后三条不部署到线上？"):
+    st.markdown("""
+**1. 承载不了。** Streamlit Cloud 只运行一个 Streamlit 应用：单端口、无常驻进程。
+HTTP API 需要独立监听端口，MCP 是 stdio 常驻协议（要被本地客户端当子进程拉起）
+—— 没有地方挂载它们。
+
+**2. 不应该上。** 文件操作 Agent 的默认工作目录与安全白名单都指向本机：
+
+```python
+run_agent(question, work_dir="C:/Users/24162/Desktop", ...)   # 默认工作目录
+ALLOWED_DIRS = ["C:\\\\Users", "/home", os.getcwd()]           # 安全白名单
+```
+
+它的用途**就是**操作本机文件。放到公网等于开放服务器文件系统 —— 这是安全事故，
+不是技术难度。
+
+**3. 需要本地进程。** Ollama 私有化推理与视觉模型要在本机跑，云端没有。
+
+---
+
+**✅ 本 Demo 可完整演示**：问答主链路全环节 ——
+多格式解析（含 Word 表格、图片/扫描件 OCR）→ 分块 → 嵌入 → BM25 + 向量混合检索
+→ RRF 融合 → 交叉编码精排 → 质量门控 → 引用可核实，以及 RAGAS 四指标量化评估。
+""")
 
 st.divider()
 st.caption("Built with Streamlit + Chroma + DeepSeek | 吴永健 | 2026")
