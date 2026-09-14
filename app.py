@@ -43,8 +43,8 @@ st.sidebar.markdown("""
 
 ### 技术栈
 - 🔍 混合检索（BM25 + 向量）
-- 🧠 LangGraph Agent
-- 📊 LLM-as-Judge 评估
+- 🧠 LangGraph Agent（HTTP API 入口）
+- 📊 RAGAS 评估（业界标准）
 - 🖼️ 多模态 OCR（图片 / 扫描件）
 - 🔒 私有化离线（Ollama 可选）
 - 🗄️ SQLite + Chroma
@@ -68,15 +68,15 @@ with col1:
     |------|----------------|
     | ❌ 本地玩具 | ✅ **线上部署**，面试官点开就能用 |
     | ❌ 假数据 | ✅ 上传**真实文档**，支持 PDF/Word/TXT + 图片(OCR)/扫描件 |
-    | ❌ 没评估 | ✅ 内置 **LLM 评估面板**，量化展示检索质量 |
+    | ❌ 没评估 | ✅ 内置 **RAGAS 评估面板**，四指标百分制量化检索与生成质量 |
 
     ### 核心技术亮点
 
     - **混合检索**：BM25 关键词 + 向量语义，RRF 融合
     - **多知识库**：每个知识库独立隔离，可按主题分别建库管理
-    - **文档解析**：PDF（PyMuPDF）+ Word（python-docx）+ 文本
-    - **量化评估**：LLM-as-Judge 四维评估（Recall / Precision / Faithfulness / Relevancy）
-    - **引用溯源**：每个回答标注来源文件和页码
+    - **文档解析**：PDF / Word（含表格）/ Markdown / TXT / CSV，图片与扫描件走本地 OCR
+    - **量化评估**：业界标准 RAGAS 四指标 —— Context Precision / Context Recall / Faithfulness / Answer Relevancy，0-100 百分制
+    - **引用可核实**：回答标注引用序号 → 映射回真实来源 → 展开可见命中原文
     """)
 
 with col2:
@@ -86,7 +86,7 @@ with col2:
     1. **创建知识库** — 给它起个名字
     2. **上传文档** — PDF、Word、TXT 都支持
     3. **开始问答** — 用中文提问
-    4. **查看评估** — LLM 量化数据
+    4. **查看评估** — RAGAS 量化数据
     """)
 
     st.success("""
