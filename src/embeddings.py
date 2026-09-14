@@ -52,7 +52,27 @@ def _with_query_instruction(text: str) -> str:
         return BGE_QUERY_INSTRUCTION + text
     return text
 
-_client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_API_BASE, timeout=30.0)
+# ⚠️ 云端客户端必须**延迟构造**，不能在模块级直接 `OpenAI(...)`。
+# 原因：`OpenAI(api_key="")` 会当场抛
+#   `OpenAIError: Missing credentials. Please pass an api_key ...`
+# （openai 2.x、3.x 均已实测，行为一致）。写在模块级 = 「没有凭据就无法 import 本模块」，
+# 于是所有**不需要调 API 的用法**都会在导入期崩掉：
+#   · CI（无任何密钥）—— 三个测试文件只是 import 了 vector_store 就在收集阶段集体
+#     ImportError，整个 test job 挂了一个月（2026-09-14 事故）；
+#   · MCP / 脚本 / 只跑清洗分块的离线流程，也一样。
+# 凭据缺失应该在**调用时**报错，而不是在 import 时报错——那是两件事。
+# 写法与 `_get_ollama_embed_client()` 保持一致。
+_client = None
+
+
+def _get_client() -> OpenAI:
+    """首次调用时才建云端客户端。缺少 key 时这里才报错（而不是 import 时）。"""
+    global _client
+    if _client is None:
+        _client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_API_BASE, timeout=30.0)
+    return _client
+
+
 # 本地 Ollama embedding 客户端（仅 EMBEDDING_BACKEND=ollama 时使用）
 _ollama_client = None
 
@@ -79,7 +99,7 @@ def _embed_one_batch(texts: list[str]) -> list[list[float]]:
             print(f"[Embedding] Ollama 失败，回退云端: {type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
             # 回退到云端，保证建库不中断
-    response = _client.embeddings.create(
+    response = _get_client().embeddings.create(
         model=EMBEDDING_MODEL,
         input=texts,
         timeout=EMBED_TIMEOUT,   # per-request 覆盖，按批给足时间

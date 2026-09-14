@@ -21,6 +21,43 @@
 5. **不许让文档与行为脱钩**：改代码时若让某条描述失效（如关掉某个开关、重命名模块），
    必须**全仓 grep 同一关键词**把同源的表述一起改掉，不能只改被报告的那一处。
 
+6. **导入不得要求凭据**：模块级不许构造 API 客户端。
+
+   `OpenAI(api_key="")` 会当场抛 `OpenAIError: Missing credentials`（openai 2.x / 3.x
+   行为一致，已实测）。写在模块级就等于「**没有凭据就不能 import 本模块**」，于是所有
+   不需要调 API 的用法都会在导入期崩：CI（无任何密钥）、MCP、只跑清洗/分块的离线流程。
+   实际后果：`src/embeddings.py` 的模块级客户端让三个测试文件在**收集阶段**集体
+   ImportError，test job 红了一个月（2026-09-14）。本地有 `.env` 所以完全看不出来。
+   → 一律**延迟构造**（首次调用时才建），写法参考 `src/embeddings.py::_get_client`。
+   **凭据缺失该在调用时报错，而不是在 import 时报错——那是两件事。**
+   守卫测试：`pytest tests/test_import_no_credentials.py`。
+
+## CI 红了怎么查
+
+CI 默认只给一句 `Process completed with exit code 2.`，按这个顺序拿原文：
+
+1. **读 annotations**（匿名可读，不需要任何凭据）：
+   ```bash
+   curl -s "https://api.github.com/repos/wuuu0236/dev-agent/actions/runs/<RUN_ID>/jobs"
+   curl -s "https://api.github.com/repos/wuuu0236/dev-agent/check-runs/<JOB_ID>/annotations"
+   ```
+   `.github/workflows/ci.yml` 的测试步骤会把 pytest 的关键失败行拼成一条注解，
+   依赖自检也会发 `::error::` —— 所以这两步的失败原文在这里都看得到。
+   ⚠️ **job 日志走 `/actions/jobs/<id>/logs` 需要鉴权（匿名 403）**，别在那浪费时间。
+   ⚠️ 匿名调用 GitHub API 限 60 次/小时，别在循环里高频查。
+
+2. **看清退出码**：**2 = 收集错误**（ImportError / 语法错误 / 导入期崩），
+   **1 = 真的有测试失败**。（历史上两者叠过一次：新的收集错误把旧的真失败挡住，
+   只修一层会以为没效果。）
+
+3. 注解信息不够时，按这个顺序怀疑（每一条都真实发生过）：
+   - `requirements-dev.txt` 漏包 → `python scripts/check_ci_deps.py` 直接列出缺哪个；
+     注意**判断依据不是"装起来快不快"，而是"测试有没有 import 到它"**；
+   - 导入期要求凭据 → 见注意事项 6；
+   - **平台假设**：写死 `\` 或 `C:\` 的测试在本机 Windows 永远绿、在 CI 的 ubuntu 必红
+     （`test_path_within_boundary` 那次），写路径一律用 `os.sep` 拼；
+   - 语法用了 3.12+ 的写法而 CI 跑 3.11（本机 3.13 看不出来）。
+
 ## 每个改动的收尾清单
 
 **顺序是有理由的：从便宜到贵、从确定到不确定。** 静态检查一秒内给出行号，全量测试要几秒，

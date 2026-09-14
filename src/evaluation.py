@@ -16,7 +16,17 @@ from openai import OpenAI
 from src.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 from src.rag_qa import rag_query
 
-_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+# ⚠️ 同 src/embeddings.py：客户端延迟构造。`OpenAI(api_key="")` 会当场抛
+# `OpenAIError: Missing credentials`，写在模块级就等于「没凭据就不能 import」——
+# 而本模块的导入方（评估面板）在只读其它区块时并不需要凭据。
+_client = None
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        _client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    return _client
 
 JUDGE_PROMPT = """你是一个 RAG 系统评估专家。请根据以下信息，对 RAG 系统的表现打分。
 
@@ -76,7 +86,7 @@ def judge_single(question: str, reference: str, contexts: list[str], answer: str
         answer=answer
     )
 
-    response = _client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
