@@ -31,7 +31,7 @@
 - **MCP 工具暴露**：FastMCP 将 RAG 工具以 MCP 协议暴露（`search_user_knowledge` 等 4 个工具），与 Claude Code / Codex 打通；文件工具带三层安全审查（黑名单 → 敏感文件检测 → 白名单）。
 - **容器化部署**：Dockerfile + docker-compose（当前 compose 只含 API 服务，详见文末「已知问题」）；Streamlit Cloud 线上托管，冷启动自动预置演示知识库，开箱即用。
 - **CI 质量保障**：GitHub Actions 三道关——①静态检查（pyflakes 零告警）②依赖自检（逐个 import 核心依赖并打印版本，缺包发 GitHub annotation）③冒烟测试（22 个测试文件，只跑确定性逻辑）。另有常驻守卫测试：首页每个能力断言与代码真实值比对、`.env.example` 覆盖 config 全部键、任何模块在无 API key 环境下可 import。
-- **React 新版前端**：`frontend/` 提供 React 18 新界面，五页对照 Streamlit（智能问答 / 知识库管理 / 文档上传 / 评估面板 / 问答日志），esbuild 打包为单个自包含 HTML，由 FastAPI 同源托管在 `/app`；问答走同一套 `rag_query` 链路，并经 `/api/ask/stream` 以 SSE 流式返回（`meta` 先发引用与门控结果，`delta` 逐块推送答案），答案可点 👍/👎 写回 `answer_log.rating`，另含知识库管理、上传入库、重建索引、问答日志、评估存档等 REST 端点（`src/api/web_api.py`，见 `docs/react-frontend.md`）。
+- **React 新版前端**：`frontend/` 提供 React 18 新界面，五页对照 Streamlit（智能问答 / 知识库管理 / 文档上传 / 评估面板 / 问答日志），esbuild 打包为单个自包含 HTML，由 FastAPI 同源托管在 `/app`（`src/api/web_api.py` 共 12 个 `/api/*` 端点，双击根目录 `start-web.bat` 一键启动）。问答走同一套 `rag_query` 链路，并经 `/api/ask/stream` 以 SSE 流式返回（`meta` 先发引用与门控结果，`delta` 逐块推送答案，`done` 带回日志 id）；答案中的 `[n]` 序号可点击，联动展开并高亮对应引用块；每条答案可点 👍/👎 写回 `answer_log.rating`（再点撤销）；问答日志页可按「只看未命中 / 只看已反馈」筛选，筛选在 SQL 层完成。详见 [`docs/react-frontend.md`](docs/react-frontend.md)。
 
 ---
 
@@ -69,7 +69,7 @@ flowchart LR
 | 入口 | 定位 | 能力 | 线上 |
 |------|------|------|:----:|
 | **Web 智能问答**（`pages/3_💬_智能问答.py`） | 知识库问答（纯 RAG，快路径） | 快、带引用来源、6 轮追问上下文 | ✅ |
-| **React 前端**（`frontend/` + `/api/*`） | 新版界面（已接后端） | 五页对照 Streamlit：问答 / 管理 / 上传 / 评估 / 日志；由 FastAPI 同源托管在 `/app` | ❌ 本机 |
+| **React 前端**（`frontend/` + `/api/*`） | 新版界面（已接后端，日常推荐） | 五页：问答（SSE 流式 + 引用联动 + 👍/👎 反馈）/ 管理 / 上传 / 评估 / 日志（按信号筛选）；由 FastAPI 同源托管在 `/app` | ❌ 本机 |
 | **HTTP API**（`/chat`、`/chat/stream`） | 文件操作 Agent（LangGraph 工具循环，慢路径） | 文件工具 + 顺手查知识库；历史 / 流式与 RAG 对齐 | ❌ 本机 |
 | **MCP 工具服务**（`src/mcp_server.py`） | 供 Claude Code / Codex 调用 | `search_user_knowledge` 等 4 个工具 | ❌ 本机 |
 
@@ -154,6 +154,34 @@ curl -N -X POST http://localhost:8000/chat/stream \
   -d '{"question": "读取 111.txt 的内容"}'
 ```
 
+### RAG 端点（供 React 前端使用，同源挂在 `/api` 下）
+
+```bash
+# 知识库列表
+curl http://localhost:8000/api/kbs
+
+# 问答（非流式）：返回答案 + 引用 + 门控信息 + log_id
+curl -X POST http://localhost:8000/api/ask \
+  -H "Content-Type: application/json" \
+  -d '{"kb_id": "af14d071", "question": "RAG Agent 指南包含哪些内容？"}'
+
+# 问答（SSE 流式）：meta → delta… → done
+curl -N -X POST http://localhost:8000/api/ask/stream \
+  -H "Content-Type: application/json" \
+  -d '{"kb_id": "af14d071", "question": "RAG Agent 指南包含哪些内容？"}'
+
+# 给某条回答打反馈（rating: up / down / null，null = 撤销）
+curl -X POST http://localhost:8000/api/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"log_id": 42, "rating": "up"}'
+
+# 问答日志：按信号筛选（只返回该库下符合条件的记录）
+curl "http://localhost:8000/api/answer_log?kb_id=af14d071&only_ungrounded=true"
+curl "http://localhost:8000/api/answer_log?kb_id=af14d071&only_rated=true"
+```
+
+其余端点（上传入库、重建索引、删除文档、评估存档）见 `http://localhost:8000/docs` 与 [`docs/react-frontend.md`](docs/react-frontend.md)。
+
 ---
 
 ## 🧩 Agent 工具
@@ -181,7 +209,9 @@ curl -N -X POST http://localhost:8000/chat/stream \
 | 向量库 | Chroma |
 | 查询改写 | 多轮追问消解：历史 + 当前问题 → 自包含检索 query（仅追问触发，失败退回原 query） |
 | 质量门控 | 精排分数阈值拒答：未达阈值不注入上下文，改由无依据提示词如实说「知识库中没有找到」（可配可关） |
-| 引用 | 序号 → 真实来源映射 + 命中原文片段（防编造 / 可追溯 / 可核实） |
+| 引用 | 序号 → 真实来源映射 + 命中原文片段（防编造 / 可追溯 / 可核实）；前端序号与引用块双向联动 |
+| 流式输出 | SSE（`/api/ask/stream`）：`meta`（引用 + 门控）→ `delta`（逐块）→ `done`（含 log_id） |
+| 用户反馈 | 每条回答 👍/👎 → 写回 `answer_log.rating`；已反馈记录不参与容量淘汰 |
 | 索引运维 | 原文留存 + 一键重建索引（`reindex.rebuild_kb`，改参数后老文档可重跑） |
 | 检索 | 稠密向量（Chroma · cosine）+ BM25（jieba 分词）+ RRF 融合 |
 | 精排 | bge-reranker-v2-m3 交叉编码（硅基流动 API；失败自动降级为粗排顺序） |
@@ -315,8 +345,10 @@ Agent 每次调用的完整链路自动上报到 Langfuse Cloud，
 ```
 dev-agent/
 ├── app.py                        # Streamlit Web 入口（冷启动自动补演示知识库）
+├── start-web.bat                 # 一键启动：起 FastAPI + 自动打开 React 前端（Windows）
+├── AGENT.md                      # 给 AI 助手的协作规则（只做指定范围内的事）
 ├── pages/                        # 4 个页面：知识库管理 / 文档上传 / 智能问答 / 评估面板
-├── frontend/                     # React 18 新版界面：app.jsx 源码 + esbuild 单文件打包 → index.html（由 FastAPI 托管在 /app）
+├── frontend/                     # React 18 新版界面：app.jsx 源码 + template.html 骨架 + build.mjs 构建脚本 → 单文件 index.html（FastAPI 托管在 /app）
 ├── src/
 │   ├── config.py                 # 配置中枢（所有开关集中在此，环境变量可覆盖）
 │   ├── parser.py                 # 文档解析（PDF / docx / txt / md / 图片 OCR）
@@ -365,6 +397,7 @@ dev-agent/
 
 - **Docker 只起 API**：`docker-compose.yml` 目前只映射并启动 FastAPI（8000），未包含 Web 服务；且其中挂载了开发者本机的桌面路径（`C:/Users/24162/Desktop:/app/host-desktop`），在别的机器上需自行调整。
 - **Python 版本标注不一致**：`Dockerfile` 用 `python:3.11-slim`，`runtime.txt` 声明 `3.13.0`（供 Streamlit Cloud 使用）。两者用途不同，但本地开发建议与 Dockerfile 对齐用 3.11。
+- **重建索引只覆盖留有原文的文档**：原文在**上传时**按知识库留存（`data/uploads/{kb_id}/`）；脚本灌入的种子文档与早期文档没有原文，重建时会被如实跳过（`reindex.rebuildable_docs` 会列出缺失项）。所以「改参数后老文档重跑」只对通过界面上传的文档成立。
 - **PDF 表格的行列关系会错乱**：PDF 文本层里**没有表格结构，只有坐标**。实测一张 3×3 表格解析出来是这样（内容一个不少，但行列全乱）：
   ```
   基金代码年化收益风险等级025490
