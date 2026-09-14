@@ -82,6 +82,7 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 | `/api/kbs/{kb_id}/docs` | GET | 文档列表 + 统计 | `database.list_documents` |
 | `/api/ask` | POST | RAG 问答：question + kb_id + history（最近 6 轮） | `rag_qa.rag_query` 全链路 |
 | `/api/ask/stream` | POST | 同上，答案用 SSE 逐块推送（前端打字机效果） | `rag_qa.stream_rag_query` |
+| `/api/feedback` | POST | 给某条回答打 👍/👎（`rating = 'up' / 'down' / null`） | `answer_log.set_rating` |
 | `/api/kbs/{kb_id}/upload` | POST | 上传入库（multipart） | `parser.parse_file` → `chunker.chunk_parsed` → `vector_store.add_chunks` |
 | `/api/kbs/{kb_id}/reindex` | POST | 按当前参数重建索引 | `reindex.rebuild_kb` |
 | `/api/docs/{doc_id}` | DELETE | 删文档（SQLite + Chroma 双清） | `database.delete_document` + `vector_store.delete_chunks_by_source` |
@@ -117,6 +118,17 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 `meta` 先发的意义：前端在模型吐第一个字之前就能把引用骨架和门控结果渲染出来，首屏等待只包含检索，不含生成。
 
 `EventSource` 不支持 POST，所以前端用 `fetch` + `res.body.getReader()` 手动读流、按空行切分事件解析（见 `app.jsx` 的 `send`）。`/api/ask`（非流式）保留，供脚本调用与兜底。
+
+### 回答反馈（👍/👎）
+
+每条回答底部有「有用 / 没用」两个按钮，点击后 `POST /api/feedback { log_id, rating }` 写回 `answer_log.rating`（`log_id` 来自 SSE 的 `done` 事件）。再点一次同一个按钮 = 撤销（传 `null`）。
+
+几个设计点：
+
+- **反馈是稳定信号，不会被容量淘汰清掉**——`answer_log._evict` 只清理 `rating IS NULL` 的记录，人工标注过的会一直留在库里；
+- **前端先改本地状态再发请求**（乐观更新），请求失败才回滚，点按钮不会有延迟感；
+- `rating` 非法值返回 400（`set_rating` 只允许 `None / 'up' / 'down'`），`log_id` 不存在返回 404；
+- 与「问答日志」页面的关系是：那里统计的是**隐式信号**（没答上来 = 库里缺东西），这里是**显式信号**（答上来了但用户觉得没用）——两者互补，都是后续调检索 / 补文档的入口。
 
 部署相关：FastAPI 加了 CORS（`allow_origins=["*"]`，本机服务 + 允许 `file://` 直开调试），并把 `frontend/` 目录挂在 `/app` 静态托管，因此前端用相对路径即可，不需要配置 API 地址。上传接口依赖 `python-multipart`（已加入 `requirements.txt`），缺了会在定义路由时直接抛 `RuntimeError`。
 

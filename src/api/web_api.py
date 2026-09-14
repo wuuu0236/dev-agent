@@ -188,6 +188,31 @@ def ask_stream(request: AskRequest):
     )
 
 
+class FeedbackRequest(BaseModel):
+    """对某条回答的人工反馈"""
+    log_id: int = Field(description="要打反馈的问答日志 id（/api/ask 或 done 事件返回）")
+    rating: str | None = Field(default=None, description="'up' / 'down' / null（null = 撤销）")
+
+
+@router.post("/feedback", summary="给某条回答打反馈（👍/👎）")
+def feedback(request: FeedbackRequest):
+    """把人工反馈写回 answer_log.rating。
+
+    rating 只允许 None / 'up' / 'down'，非法值由 answer_log.set_rating 抛错后转 400。
+    带反馈的记录不会被容量淘汰清理，因此这些标注是稳定的信号源。
+    """
+    from src.answer_log import set_rating
+
+    try:
+        hit = set_rating(request.log_id, request.rating)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not hit:
+        raise HTTPException(status_code=404, detail=f"问答记录不存在: {request.log_id}")
+    return {"ok": True, "log_id": request.log_id, "rating": request.rating}
+
+
 @router.post("/kbs/{kb_id}/upload", summary="上传文档并入库")
 async def upload(kb_id: str, file: UploadFile = File(...)):
     """与「文档上传」页同一条链路：保存原文 → 解析 → 切块 → 嵌入入库。"""

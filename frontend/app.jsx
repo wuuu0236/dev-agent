@@ -129,6 +129,23 @@ function ChatPage({ apiReady, kbId, kbName }) {
   const [expanded, setExpanded] = useState(null);
   const bottomRef = useRef(null);
 
+  // 反馈写回 answer_log.rating；再点一次同一个 = 撤销。失败则回滚本地状态
+  const rate = async (idx, rating) => {
+    const msg = msgs[idx];
+    if (!msg || msg.logId == null) return;
+    const next = msg.rating === rating ? null : rating;
+    setMsgs((m) => { const c = m.slice(); c[idx] = { ...c[idx], rating: next }; return c; });
+    try {
+      await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ log_id: msg.logId, rating: next }),
+      });
+    } catch (_) {
+      setMsgs((m) => { const c = m.slice(); c[idx] = { ...c[idx], rating: msg.rating }; return c; });
+    }
+  };
+
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, typing]);
 
   const send = async (text) => {
@@ -202,7 +219,12 @@ function ChatPage({ apiReady, kbId, kbName }) {
           patchLast((msg) => ({ ...msg, content: answer }));
         } else if (event === "done") {
           const latency = ((Date.now() - t0) / 1000).toFixed(1) + "s";
-          patchLast((msg) => ({ ...msg, content: data.answer || answer, meta: { ...meta, latency } }));
+          patchLast((msg) => ({
+            ...msg,
+            content: data.answer || answer,
+            logId: data.log_id,
+            meta: { ...meta, latency },
+          }));
         }
       };
 
@@ -248,6 +270,20 @@ function ChatPage({ apiReady, kbId, kbName }) {
                     <span className="meta-chip">{m.meta.rerank}</span>
                     <span className="meta-chip">耗时 {m.meta.latency}</span>
                     {m.meta.rewritten && <span className="meta-chip">改写检索：{m.meta.rewritten}</span>}
+                  </div>
+                )}
+                {m.logId != null && (
+                  <div className="feedback">
+                    <span className="fb-label">这条回答有帮助吗</span>
+                    <button
+                      className={"fb-btn" + (m.rating === "up" ? " on" : "")}
+                      onClick={() => rate(i, "up")}
+                    >👍 有用</button>
+                    <button
+                      className={"fb-btn" + (m.rating === "down" ? " on" : "")}
+                      onClick={() => rate(i, "down")}
+                    >👎 没用</button>
+                    {m.rating && <span className="fb-done">已记录</span>}
                   </div>
                 )}
                 {m.citations && m.citations.length > 0 && (

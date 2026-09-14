@@ -196,6 +196,25 @@ def _evict(conn, kb_id: str) -> int:
     return cur.rowcount or 0
 
 
+def set_rating(log_id: int, rating: str | None) -> bool:
+    """给某条回答打反馈：'up'（有用）/ 'down'（没用）/ None（撤销）。
+
+    返回是否命中该条记录。rating 列在建表时就预留了（NULL / 'up' / 'down'），
+    这是唯一的写入口——Web 端的 👍/👎 与未来的其他入口都走这里。
+    带 rating 的记录不会被 `_evict` 的容量淘汰清掉（见该函数：只淘汰 rating IS NULL 的），
+    所以人工标注过的信号不会意外丢失。
+    """
+    if rating not in (None, "up", "down"):
+        raise ValueError(f"rating 只能是 None / 'up' / 'down'，收到：{rating!r}")
+
+    _init_table()
+    conn = _connect()
+    cur = conn.execute("UPDATE " + _TABLE + " SET rating = ? WHERE id = ?", (rating, log_id))
+    conn.commit()
+    conn.close()
+    return bool(cur.rowcount)
+
+
 def get_answer(log_id: int) -> dict | None:
     """按 id 取一条（含 hits 解析后的列表）。"""
     _init_table()
