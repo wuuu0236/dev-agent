@@ -104,9 +104,13 @@ python src/api/server.py
 # 浏览器打开 http://localhost:8000/docs
 ```
 
-### 方式三：React 前端（新版界面）
+### 方式三：React 前端（新版界面，推荐日常使用）
 
 ```bash
+# 最简单：双击项目根目录的 start-web.bat
+#   自动起服务 + 10 秒后自动打开浏览器（Windows，需已装好依赖）
+
+# 或手动启动：
 python src/api/server.py
 # 浏览器打开 http://localhost:8000/app   → React 前端（接真实后端）
 #            http://localhost:8000/docs  → API 文档（含 /api/* 全部端点）
