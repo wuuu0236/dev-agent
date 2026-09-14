@@ -32,8 +32,22 @@
    ```bash
    pytest tests/test_app_homepage.py -q
    ```
-3. `git commit`：提交信息用中文，写清「**问题 → 改动 → 测试/实测结果**」，与既有风格一致。
-4. `git push origin master`，然后**核对远程真实 hash**：
+3. 静态检查（`pip install -r requirements-dev.txt` 里已含 pyflakes）：
+   ```bash
+   python -m pyflakes src/ pages/ app.py scripts/ tests/
+   ```
+   **逐条判断，不追求零输出**。判断原则：
+
+   - `undefined name` / `redefinition` → **真问题，必须修**。这类错误能在一个后端路径里
+     潜很久：`_get_ollama_client` 里的 `OpenAIClient` 写成不存在的类名，云端全正常、
+     只有选 ollama 时 NameError，被宣传的离线能力一直是死的。
+   - `imported but unused` → 先看是不是**故意的 re-export**（本仓库有，带注释），
+     不是就删掉；删不掉的加 `# noqa: F401`。
+   - `assigned to but never used` → **重点看**。多半意味着「文案里写了、代码里没用」：
+     曾有一个 `NEAR_MISS_RATIO` 只出现在评估面板的界面上，分类逻辑从没读过它 ——
+     界面上因此写着一条根本不存在的分界线。
+4. `git commit`：提交信息用中文，写清「**问题 → 改动 → 测试/实测结果**」，与既有风格一致。
+5. `git push origin master`，然后**核对远程真实 hash**：
    ```bash
    git ls-remote origin refs/heads/master
    ```

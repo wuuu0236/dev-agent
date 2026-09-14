@@ -13,3 +13,9 @@ rank-bm25>=0.2.2
 jieba>=0.42.0
 langfuse>=2.50.0,<2.51.0
 pytest>=7.0
+# 静态检查：只报「未定义名 / 未使用导入 / 重复定义」，不带风格规则噪音。
+# 引入它是因为一个真实事故：`_get_ollama_client` 里把 `OpenAI` 写成了不存在的
+# `OpenAIClient`，云端路径完全正常、只有选 ollama 时才 NameError —— 于是被宣传的
+# 「本地私有化 / 离线」一直是死的，谁都没发现。pyflakes 一行就能报出来。
+# 用法见 AGENTS.md 收尾清单第 3 步。
+pyflakes>=3.0
