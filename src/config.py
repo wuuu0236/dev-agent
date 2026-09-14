@@ -78,6 +78,16 @@ RAG_HISTORY_TURNS = 6  # 注入的最近对话条数（按消息条数切，非�
 # 设为 0 表示自动 = top_k * 10（top_k=5 时捞 50 条）。
 RETRIEVE_CANDIDATES = int(os.getenv("RETRIEVE_CANDIDATES", "0"))
 
+# --- 查询改写（追问消解）---
+# 为什么需要：多轮追问「那第二点呢」直接拿去检索是捞不到东西的——指代没被消解。
+# 历史本来就在手（pages/3 传了 history），但此前只接进生成阶段，检索那一行吃的
+# 还是原始字符串。本开关让检索前多一层改写：历史 + 当前问题 → 一句自包含的查询。
+# 只在有历史时触发（单轮独立提问直接返回原 query，零成本），失败/空/超长一律
+# 退回原 query，与 reranker 同一套降级策略，不阻断问答。
+# 代价：每次追问多一次 LLM 调用（约 0.3–1s）。要跑对照设 QUERY_REWRITE_ENABLED=false。
+QUERY_REWRITE_ENABLED = os.getenv("QUERY_REWRITE_ENABLED", "true").lower() == "true"
+QUERY_REWRITE_MAX_CHARS = int(os.getenv("QUERY_REWRITE_MAX_CHARS", "200"))  # 超长视为"开始答题"而非改写
+
 # --- Rerank 精排（交叉编码）---
 # 为什么需要：向量检索是「双塔」——query 和 doc 分开编码成向量再比余弦，
 # 快但两者从未见过面，丢失词级交互；reranker 是「交叉编码」——把 query 和

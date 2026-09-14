@@ -1,7 +1,8 @@
 """
 RAG 问答主链路（确定性管道，**非 Agent**）
 
-链路：HybridRetriever 检索 → 交叉编码精排 → 拼上下文 → LLM 生成 → 引用映射。
+链路：查询改写（多轮追问消解指代）→ HybridRetriever 检索 → 交叉编码精排 → 拼上下文
+     → LLM 生成 → 引用映射。
 本模块不含自主决策；Agent（LangGraph 工具循环）实现在 src/agent/dev_agent_langgraph.py，
 服务于 HTTP API 路径。二者分工见 README「两条入口，一个大脑」。
 
@@ -16,7 +17,9 @@ RAG 问答主链路（确定性管道，**非 Agent**）
      - 云端模式无视觉模型，自动依赖 OCR 文字（已在 chunk 内容中），**绝不向文本模型发送图片**。
 
 对外 API：
-  rag_query(kb_id, query, top_k, backend=None, vision_model=None) -> {answer, sources, query}
+  rag_query(kb_id, query, top_k, backend=None, vision_model=None, history=None)
+      -> {answer, sources, contexts, query, retrieval_query}
+  stream_rag_query(...) -> (答案生成器, sources, contexts, retrieval_query)
   backend / vision_model 不传则读 config，保证已部署的云端 Demo 行为不变。
 """
 import re
@@ -32,6 +35,8 @@ from src.config import (
 )
 # 生产检索器：基于 Chroma + BM25 + RRF，按 kb_id 检索（与已部署版本一致）
 from src.hybrid_retriever import HybridRetriever
+# 查询改写：多轮追问先消解指代再检索（无历史时零成本原样返回）
+from src.query_rewrite import rewrite_query
 
 # 云端 DeepSeek 客户端（观测由 @observe 装饰器完成，不依赖 langfuse.openai）
 # 惰性创建：模块 import 不造客户端——没配 key 的环境（CI / 测试）也能 import，
@@ -207,22 +212,26 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
               vision_model: str | None = None,
               history: list[dict] | None = None) -> dict:
     """完整的 RAG 查询流程：检索 + 生成。backend/vision_model 不传则读 config。"""
-    # 1. 检索
+    # 1. 追问消解：历史 + 当前问题 → 自包含的检索 query（无历史 / 失败则原样返回）
+    retrieval_query = rewrite_query(query, history)
+
+    # 2. 检索
     retriever = HybridRetriever(kb_id)
-    contexts = retriever.search(query, top_k=top_k)
+    contexts = retriever.search(retrieval_query, top_k=top_k)
 
     if not contexts:
         return {
             "answer": "知识库中没有找到相关内容，请先上传文档。",
             "sources": [],
             "query": query,
+            "retrieval_query": retrieval_query,
         }
 
-    # 2. 生成（带最近对话历史，多轮追问有上下文）
+    # 3. 生成（带最近对话历史，多轮追问有上下文）
     answer = generate_answer(query, contexts, backend=backend, vision_model=vision_model,
                              history=history)
 
-    # 3. 去重引用来源（图片块也带上类型标记，便于前端展示）
+    # 4. 去重引用来源（图片块也带上类型标记，便于前端展示）
     seen = set()
     unique_sources = []
     for c in contexts:
@@ -236,17 +245,21 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             })
 
     # contexts 一并返回：评估面板复用它做 LLM Judge，避免二次检索。
-    # 前端只读 answer / sources，多这个 key 不影响既有调用。
-    return {"answer": answer, "sources": unique_sources, "contexts": contexts, "query": query}
+    # retrieval_query 是实际用于检索的 query（单轮时等于原 query，追问时是消解后的）,
+    # 便于前端与排查时看清"检索到底拿什么去搜了"。
+    return {"answer": answer, "sources": unique_sources, "contexts": contexts,
+            "query": query, "retrieval_query": retrieval_query}
 
 
 def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                      backend: str | None = None,
                      vision_model: str | None = None,
                      history: list[dict] | None = None):
-    """流式版 RAG 查询。返回 (答案生成器, sources, contexts)。
+    """流式版 RAG 查询。返回 (答案生成器, sources, contexts, retrieval_query)。
 
     网页用 st.write_stream(gen) 渲染打字机效果；sources 用于展示引用来源。
+    retrieval_query 是实际拿去检索的 query——单轮时等于用户原话，追问时是消解指代后的
+    自包含问题，前端可据此把"检索用了什么"展示出来。
     rag_query（非流式）保留给评估面板使用。history 为最近对话轮次（多轮追问）。
     """
     from src.query_cache import get_cached_answer, cache_answer  # 模块顶层 import 无副作用（embedding 惰性）
@@ -259,13 +272,17 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             def gen_cached():
                 yield cached["answer"]
 
-            return gen_cached(), cached["sources"], []
+            return gen_cached(), cached["sources"], [], query
+
+    # 追问消解：历史 + 当前问题 → 自包含的检索 query（无历史 / 失败则原样返回）。
+    # 注意只作用于检索——生成阶段仍用用户原话，历史另由 _prepare_generation 注入。
+    retrieval_query = rewrite_query(query, history)
 
     retriever = HybridRetriever(kb_id)
-    contexts = retriever.search(query, top_k=top_k)
+    contexts = retriever.search(retrieval_query, top_k=top_k)
 
     if not contexts:
-        return (iter(["知识库中没有找到相关内容，请先上传文档。"]), [], [])
+        return (iter(["知识库中没有找到相关内容，请先上传文档。"]), [], [], retrieval_query)
 
     # 去重引用来源（与 rag_query 一致）
     seen = set()
@@ -293,7 +310,7 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             except Exception:
                 pass  # 缓存失败不影响回答
 
-    return gen(), unique_sources, contexts
+    return gen(), unique_sources, contexts, retrieval_query
 
 
 def extract_cited_sources(answer: str, contexts: list[dict]) -> list[dict]:

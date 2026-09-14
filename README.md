@@ -6,7 +6,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue)]()
 [![License](https://img.shields.io/badge/License-MIT-yellow)]()
 
-基于 **FastAPI + Streamlit + LangGraph** 的个人知识库问答系统：本地文档解析与索引（向量 + BM25 + RRF 融合）、交叉编码精排、RAGAS 量化评估，另带文件操作 Agent 与 MCP 工具接口。已上线可演示。
+基于 **FastAPI + Streamlit + LangGraph** 的个人知识库问答系统：本地文档解析与索引（向量 + BM25 + RRF 融合）、多轮追问消解、交叉编码精排、RAGAS 量化评估，另带文件操作 Agent 与 MCP 工具接口。已上线可演示。
 
 🌐 **在线演示**：https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/
 
@@ -14,6 +14,7 @@
 
 ## ✨ 核心亮点
 
+- **多轮追问消解（查询改写）**：追问「那第二点呢」直接拿去检索是捞不到东西的——指代没被消解。检索前加一层改写，把「历史 + 当前问题」压成一句自包含查询再检索（`src/query_rewrite.py`）。单轮提问零成本跳过，改写失败 / 结果异常一律退回原 query，与精排同一套降级策略。
 - **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前 `BM25_WEIGHT=0`（经 A/B 测试，当前文档场景下纯向量优于混合），BM25 代码保留、改权重即可启用。
 - **交叉编码精排（Rerank）**：粗排从候选池捞 50 条，再由 `bge-reranker-v2-m3` 逐条精排取 top 5。A/B 实测（同库同测试集，只切这一个开关）：Recall@5 0.960→1.000、Hit@1 0.840→0.920、MRR 0.887→0.960。任一批次失败即整体降级为粗排顺序，不影响问答可用性。
 - **数据清洗管线**：归一化 → 跨页页眉页脚去除（按页首尾行跨页统计）→ PDF 硬换行断句合并 → 垃圾块过滤。收口在 `parser.parse_file()`，Web 上传 / Agent 工具 / 脚本灌库三条入库路径全覆盖，可一键开关做 A/B。
@@ -145,6 +146,7 @@ curl -N -X POST http://localhost:8000/chat/stream \
 | API | FastAPI + Uvicorn |
 | 数据库 | SQLite |
 | 向量库 | Chroma |
+| 查询改写 | 多轮追问消解：历史 + 当前问题 → 自包含检索 query（仅追问触发，失败退回原 query） |
 | 检索 | 稠密向量（Chroma · cosine）+ BM25（jieba 分词）+ RRF 融合 |
 | 精排 | bge-reranker-v2-m3 交叉编码（硅基流动 API；失败自动降级为粗排顺序） |
 | 数据清洗 | 自实现四步清洗（归一化 / 页眉页脚 / 硬换行合并 / 垃圾块过滤） |
@@ -173,7 +175,8 @@ curl -N -X POST http://localhost:8000/chat/stream \
 **检索侧（在线，每次提问跑一次）**
 
 ```
-提问 → ┬── BM25（jieba 分词）─┐
+提问 → 追问消解（仅多轮：历史 + 当前问题 → 一句自包含查询；单轮跳过）
+     → ┬── BM25（jieba 分词）─┐
        └── 稠密向量语义检索 ───┴─→ RRF 融合 → 候选池 50 条
                                               → bge-reranker-v2-m3 精排
                                               → top 5 拼上下文
@@ -277,8 +280,9 @@ dev-agent/
 │   ├── embeddings.py             # 嵌入层（分批 / 重试 / 查询侧编码；云端与本地双后端）
 │   ├── vector_store.py           # Chroma 向量存储（增删改查、按来源删除）
 │   ├── reranker.py               # 交叉编码精排（bge-reranker-v2-m3）
+│   ├── query_rewrite.py          # 多轮追问消解（历史 + 当前问题 → 自包含检索 query）
 │   ├── hybrid_retriever.py       # 混合检索（向量 + BM25 + RRF 融合）
-│   ├── rag_qa.py                 # 线上 Web 问答主链路（检索 → 拼上下文 → 生成 → 引用）
+│   ├── rag_qa.py                 # 线上 Web 问答主链路（改写 → 检索 → 拼上下文 → 生成 → 引用）
 │   ├── query_cache.py            # 语义缓存（重复/相似问题秒回，向量方案变更自动失效）
 │   ├── database.py               # SQLite 元数据（知识库 / 文档）
 │   ├── evaluation_ragas.py       # RAGAS 四维评估（0-100 百分制）
@@ -294,7 +298,7 @@ dev-agent/
 │   ├── seed.py                   # 预置演示知识库（幂等，冷启动自动调用）
 │   ├── build_eval_kb.py          # 构建检索评测语料库
 │   └── eval_retrieval.py         # 检索评测（Recall@K / Hit@K / Hit@1 / MRR）
-├── tests/                        # 12 个测试文件（清洗 / 分块 / 精排 / 嵌入 / 删除一致性 / 安全 …）
+├── tests/                        # 13 个测试文件（清洗 / 分块 / 精排 / 追问改写 / 嵌入 / 删除一致性 / 安全 …）
 ├── knowledge/                    # 知识库样例文档
 ├── notes/                        # 设计与审查笔记（RAG 六环节、MaxKB 对标、工程审查）
 ├── ingest_missing.py             # 一次性补数据脚本

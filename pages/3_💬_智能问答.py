@@ -90,7 +90,7 @@ if query := st.chat_input("输入你的问题..."):
             {"role": m["role"], "content": m["content"]}
             for m in st.session_state.messages[:-1] if m.get("content")
         ]
-        gen, sources, contexts = stream_rag_query(
+        gen, sources, contexts, retrieval_query = stream_rag_query(
             kb_id, query, top_k=TOP_K_RETRIEVE,
             backend=st.session_state.get("qa_backend", "cloud"),
             vision_model=st.session_state.get("qa_vision", ""),
@@ -99,6 +99,11 @@ if query := st.chat_input("输入你的问题..."):
         status.update(label="生成回答...", state="running")
         answer = st.write_stream(gen)
         status.update(label="完成", state="complete")
+
+        # 追问消解可见化：检索是拿改写后的 query 去的，不是用户原话。
+        # 只在真的改写了才显示，单轮提问不打扰。
+        if retrieval_query and retrieval_query != query:
+            st.caption(f"🔍 追问消解后的检索用查询：{retrieval_query}")
 
         # 引用映射：回答里的 [n] → 真实来源（防 LLM 编造文件名/页码）；
         # 回答没标引用时回退到全部检索来源
