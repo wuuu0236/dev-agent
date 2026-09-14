@@ -81,6 +81,7 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 | `/api/kbs` | GET | 知识库列表 + 文档数 / chunk 数 | `database.list_kbs` / `get_kb_stats` / `vector_store.collection_count` |
 | `/api/kbs/{kb_id}/docs` | GET | 文档列表 + 统计 | `database.list_documents` |
 | `/api/ask` | POST | RAG 问答：question + kb_id + history（最近 6 轮） | `rag_qa.rag_query` 全链路 |
+| `/api/ask/stream` | POST | 同上，答案用 SSE 逐块推送（前端打字机效果） | `rag_qa.stream_rag_query` |
 | `/api/kbs/{kb_id}/upload` | POST | 上传入库（multipart） | `parser.parse_file` → `chunker.chunk_parsed` → `vector_store.add_chunks` |
 | `/api/kbs/{kb_id}/reindex` | POST | 按当前参数重建索引 | `reindex.rebuild_kb` |
 | `/api/docs/{doc_id}` | DELETE | 删文档（SQLite + Chroma 双清） | `database.delete_document` + `vector_store.delete_chunks_by_source` |
@@ -103,11 +104,24 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 
 > 门控未通过时 `rag_query` 会清空 contexts，此时最高分从本次落下的 answer_log 记录回填——前端要展示「0.28 差一点但没过阈」只能这么拿。
 
+### 流式问答（SSE）
+
+前端默认走 `/api/ask/stream`：检索与精排在生成之前就结束了，所以服务端按三个事件推送——
+
+| 事件 | 时机 | 载荷 |
+|---|---|---|
+| `meta` | 检索 + 精排完成，生成开始前 | `grounded` / `gate_score` / `retrieval_query` / `sources` |
+| `delta` | 生成过程中，每来一块推一条 | `{"text": "…"}`（多条按顺序拼接） |
+| `done` | 生成结束，日志已落库 | `answer` / `log_id` / `gate_score` |
+
+`meta` 先发的意义：前端在模型吐第一个字之前就能把引用骨架和门控结果渲染出来，首屏等待只包含检索，不含生成。
+
+`EventSource` 不支持 POST，所以前端用 `fetch` + `res.body.getReader()` 手动读流、按空行切分事件解析（见 `app.jsx` 的 `send`）。`/api/ask`（非流式）保留，供脚本调用与兜底。
+
 部署相关：FastAPI 加了 CORS（`allow_origins=["*"]`，本机服务 + 允许 `file://` 直开调试），并把 `frontend/` 目录挂在 `/app` 静态托管，因此前端用相对路径即可，不需要配置 API 地址。上传接口依赖 `python-multipart`（已加入 `requirements.txt`），缺了会在定义路由时直接抛 `RuntimeError`。
 
 ## 6. 已知限制
 
-- 问答为非流式（`/api/ask` 一次返回），打字机效果尚未做（后端已有 `stream_rag_query`，可后续加 SSE）；
 - 评估面板展示的是**历史存档**，面板内不触发新的 RAGAS 评测（评测耗时长，仍在 Streamlit 评估面板跑）；
 - 移动端未适配（以桌面演示为主，最小可用宽度约 1100px）；
 - 无路由、无持久化，刷新回到初始状态。

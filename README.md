@@ -31,7 +31,7 @@
 - **MCP 工具暴露**：FastMCP 将 RAG 工具以 MCP 协议暴露（`search_user_knowledge` 等 4 个工具），与 Claude Code / Codex 打通；文件工具带三层安全审查（黑名单 → 敏感文件检测 → 白名单）。
 - **容器化部署**：Dockerfile + docker-compose（当前 compose 只含 API 服务，详见文末「已知问题」）；Streamlit Cloud 线上托管，冷启动自动预置演示知识库，开箱即用。
 - **CI 质量保障**：GitHub Actions 三道关——①静态检查（pyflakes 零告警）②依赖自检（逐个 import 核心依赖并打印版本，缺包发 GitHub annotation）③冒烟测试（22 个测试文件，只跑确定性逻辑）。另有常驻守卫测试：首页每个能力断言与代码真实值比对、`.env.example` 覆盖 config 全部键、任何模块在无 API key 环境下可 import。
-- **React 新版前端**：`frontend/` 提供 React 18 新界面，五页对照 Streamlit（智能问答 / 知识库管理 / 文档上传 / 评估面板 / 问答日志），esbuild 打包为单个自包含 HTML，由 FastAPI 同源托管在 `/app`；问答走同一套 `rag_query` 链路，另含知识库管理、上传入库、重建索引、问答日志、评估存档等 REST 端点（`src/api/web_api.py`，见 `docs/react-frontend.md`）。
+- **React 新版前端**：`frontend/` 提供 React 18 新界面，五页对照 Streamlit（智能问答 / 知识库管理 / 文档上传 / 评估面板 / 问答日志），esbuild 打包为单个自包含 HTML，由 FastAPI 同源托管在 `/app`；问答走同一套 `rag_query` 链路，并经 `/api/ask/stream` 以 SSE 流式返回（`meta` 先发引用与门控结果，`delta` 逐块推送答案），另含知识库管理、上传入库、重建索引、问答日志、评估存档等 REST 端点（`src/api/web_api.py`，见 `docs/react-frontend.md`）。
 
 ---
 

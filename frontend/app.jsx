@@ -157,25 +157,71 @@ function ChatPage({ apiReady, kbId, kbName }) {
         .filter((m) => m.content)
         .slice(-6)
         .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content }));
-      const r = await apiPost("/api/ask", { kb_id: kbId, question: q, history });
-      const latency = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+      const res = await fetch("/api/ask/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kb_id: kbId, question: q, history }),
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+
+      // 先插一条空消息，之后每收到一个 delta 就往里追加——打字机效果
+      setMsgs((m) => [...m, { role: "ai", content: "", citations: [], meta: null }]);
       setTyping(false);
-      setMsgs((m) => [...m, {
-        role: "ai",
-        content: r.answer,
-        citations: (r.sources || []).map((s) => ({
-          n: s.n, file: s.file, page: s.page ? `P${s.page}` : "",
-          score: r.gate_score != null ? Number(r.gate_score).toFixed(2) : "—",
-          snip: s.snippets && s.snippets[0] ? s.snippets[0] : "",
-        })),
-        meta: {
-          gate: r.grounded ? "通过" : "已拒答",
-          topScore: r.gate_score != null ? Number(r.gate_score).toFixed(2) : "—",
-          rerank: "bge-reranker-v2-m3 · top5",
-          latency,
-          rewritten: r.retrieval_query && r.retrieval_query !== q ? r.retrieval_query : null,
-        },
-      }]);
+      const patchLast = (fn) =>
+        setMsgs((m) => {
+          const next = m.slice();
+          next[next.length - 1] = fn(next[next.length - 1]);
+          return next;
+        });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let answer = "";
+      let meta = {};
+
+      const applyEvent = (event, data) => {
+        if (event === "meta") {
+          meta = {
+            gate: data.grounded ? "通过" : "已拒答",
+            topScore: data.gate_score != null ? Number(data.gate_score).toFixed(2) : "—",
+            rerank: "bge-reranker-v2-m3 · top5",
+            rewritten: data.retrieval_query && data.retrieval_query !== q ? data.retrieval_query : null,
+          };
+          patchLast((msg) => ({
+            ...msg,
+            citations: (data.sources || []).map((s) => ({
+              n: s.n, file: s.file, page: s.page ? `P${s.page}` : "",
+              score: data.gate_score != null ? Number(data.gate_score).toFixed(2) : "—",
+              snip: s.snippets && s.snippets[0] ? s.snippets[0] : "",
+            })),
+            meta,
+          }));
+        } else if (event === "delta") {
+          answer += data.text;
+          patchLast((msg) => ({ ...msg, content: answer }));
+        } else if (event === "done") {
+          const latency = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+          patchLast((msg) => ({ ...msg, content: data.answer || answer, meta: { ...meta, latency } }));
+        }
+      };
+
+      // SSE 用空行分隔事件；POST 场景 EventSource 不支持，只能自己读流解析
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop();
+        for (const part of parts) {
+          const evLine = /^event:\s*(.*)$/m.exec(part);
+          const dataLine = /^data:\s*(.*)$/m.exec(part);
+          if (!evLine || !dataLine) continue;
+          try {
+            applyEvent(evLine[1].trim(), JSON.parse(dataLine[1]));
+          } catch (_) { /* 单条解析失败不中断整体流 */ }
+        }
+      }
     } catch (e) {
       setTyping(false);
       setMsgs((m) => [...m, { role: "ai", content: "请求失败：" + e.message, citations: [], meta: null }]);

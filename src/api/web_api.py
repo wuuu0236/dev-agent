@@ -12,6 +12,7 @@ Web API —— 给 React 前端（frontend/）提供 REST 端点
   GET    /api/kbs                     知识库列表（含文档数 / chunk 数）
   GET    /api/kbs/{kb_id}/docs        某知识库的文档列表
   POST   /api/ask                     RAG 问答（改写 → 检索 → 精排 → 门控 → 生成 → 引用）
+  POST   /api/ask/stream              同上，但答案用 SSE 逐块推送（前端打字机效果）
   POST   /api/kbs/{kb_id}/upload      上传并入库（解析 → 切块 → 嵌入）
   POST   /api/kbs/{kb_id}/reindex     按当前参数重建索引
   DELETE /api/docs/{doc_id}           删除文档（SQLite + Chroma 双清）
@@ -19,7 +20,10 @@ Web API —— 给 React 前端（frontend/）提供 REST 端点
   GET    /api/eval/history            RAGAS 评估历史存档
 """
 
+import json
+
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api", tags=["web"])
@@ -123,6 +127,64 @@ def ask(request: AskRequest):
         retrieval_query=result["retrieval_query"],
         sources=sources,
         log_id=result.get("log_id"),
+    )
+
+
+def _sse(event: str, data: dict) -> str:
+    """拼一条 SSE 消息。JSON 会把换行转义成 \\n，因此 data 一定是单行，符合 SSE 规范。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/ask/stream", summary="RAG 问答（SSE 流式，答案逐块推送）")
+def ask_stream(request: AskRequest):
+    """与 `/api/ask` 完全同一条链路，只是答案边生成边推送，用于前端打字机效果。
+
+    事件序列：
+      `meta`  —— 引用来源 / 实际检索 query / 门控分数。检索与精排在生成之前就结束了，
+                 所以这几个值不必等模型，前端可先把引用骨架渲染出来。
+      `delta` —— 答案片段（多条，按顺序拼接）。
+      `done`  —— 完整答案 + 本次日志 id（供反馈与后续追问）。
+    """
+    from src.database import get_kb
+    from src.rag_qa import stream_rag_query
+
+    if not get_kb(request.kb_id):
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {request.kb_id}")
+
+    gen, sources, contexts, retrieval_query, log_ref = stream_rag_query(
+        request.kb_id, request.question, top_k=request.top_k,
+        history=request.history or None,
+    )
+
+    payload_sources = [
+        {"n": i + 1, "file": s["source"], "page": s.get("page", 0),
+         "snippets": s.get("snippets", []), "type": s.get("type", "text")}
+        for i, s in enumerate(sources)
+    ]
+
+    def iter_events():
+        gate_score = log_ref.get("gate_score")
+        yield _sse("meta", {
+            "grounded": bool(contexts),
+            "gate_score": gate_score,
+            "retrieval_query": retrieval_query,
+            "sources": payload_sources,
+        })
+        chunks = []
+        for chunk in gen:
+            chunks.append(chunk)
+            yield _sse("delta", {"text": chunk})
+        # 生成器跑完后日志才落库，log_id 这时才能取到（缓存命中分支是例外，当时就有）
+        yield _sse("done", {
+            "answer": "".join(chunks),
+            "log_id": log_ref.get("id"),
+            "gate_score": gate_score,
+        })
+
+    return StreamingResponse(
+        iter_events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
