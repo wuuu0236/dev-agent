@@ -117,6 +117,24 @@ function Radar({ metrics }) {
 /* ============================================================
  * 智能问答
  * ============================================================ */
+// 把答案里的 [n] 渲染成可点序号：点一下展开并高亮对应的引用块，再点收起。
+// 序号由模型给出、由代码映射回真实检索块（见 src/citations.py），所以这里只做联动展示。
+function renderWithCitations(line, msgIdx, expanded, setExpanded) {
+  return line.split(/(\[\d+\])/g).map((part, k) => {
+    const m = /^\[(\d+)\]$/.exec(part);
+    if (!m) return <span key={k}>{part.replace(/\*\*/g, "")}</span>;
+    const key = msgIdx + "-" + m[1];
+    return (
+      <sup
+        key={k}
+        className={"cite" + (expanded === key ? " on" : "")}
+        title="查看这条引用的原文"
+        onClick={() => setExpanded(expanded === key ? null : key)}
+      >{part}</sup>
+    );
+  });
+}
+
 function ChatPage({ apiReady, kbId, kbName }) {
   const hello = apiReady === false
     ? "后端未连接，当前为演示数据。启动 `python src/api/server.py` 后刷新即可接真数据。"
@@ -260,7 +278,7 @@ function ChatPage({ apiReady, kbId, kbName }) {
               <div>
                 <div className="bubble">
                   {m.content.split("\n").map((line, j) => (
-                    <div key={j} style={{ whiteSpace: "pre-wrap" }}>{line.replace(/\*\*/g, "")}</div>
+                    <div key={j} style={{ whiteSpace: "pre-wrap" }}>{renderWithCitations(line, i, expanded, setExpanded)}</div>
                   ))}
                 </div>
                 {m.meta && (
@@ -289,7 +307,7 @@ function ChatPage({ apiReady, kbId, kbName }) {
                 {m.citations && m.citations.length > 0 && (
                   <div className="citations">
                     {m.citations.map((c) => (
-                      <div key={c.n} className="cite-item" onClick={() => setExpanded(expanded === i + "-" + c.n ? null : i + "-" + c.n)}>
+                      <div key={c.n} className={"cite-item" + (expanded === i + "-" + c.n ? " active" : "")} onClick={() => setExpanded(expanded === i + "-" + c.n ? null : i + "-" + c.n)}>
                         <div className="cite-head">
                           <sup className="cite">[{c.n}]</sup>
                           <span className="file">{c.file}</span>
