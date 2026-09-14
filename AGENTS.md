@@ -23,20 +23,14 @@
 
 ## 每个改动的收尾清单
 
-1. 全量测试全绿：
-   ```bash
-   pytest tests/ -q --ignore=tests/test_state_build.py --ignore=tests/test_smoke_imports.py
-   ```
-   （这两个文件被忽略是**环境问题**：本机隔离 venv 缺 langchain / langfuse，非代码问题。）
-2. 若动了首页 / README 文案，或改了 `src/config.py`、评估指标定义：
-   ```bash
-   pytest tests/test_app_homepage.py -q
-   ```
-3. 静态检查（`pip install -r requirements-dev.txt` 里已含 pyflakes）：
+**顺序是有理由的：从便宜到贵、从确定到不确定。** 静态检查一秒内给出行号，全量测试要几秒，
+push 不可逆。
+
+1. 静态检查（`pip install -r requirements-dev.txt` 里已含 pyflakes）：
    ```bash
    python -m pyflakes src/ pages/ app.py scripts/ tests/
    ```
-   **要求零输出**。CI 里已挂成独立 job（`.github/workflows/ci.yml` 的 `lint`），
+   **要求零输出**。CI 里已挂成独立 job（`.github/workflows/ci.yml` 的 `lint`，排在 `test` 前），
    历史告警在 2026-09-14 清过一次（原 17 条），之后再现就是新引入的。
 
    原则：**每条都要归到下面某一类，不许为了让输出变干净而把语义掩盖掉。**
@@ -48,10 +42,10 @@
    - `f-string is missing placeholders` → **先看它是不是漏了该填的值**，别直接删 `f`。
      `src/tools/safety.py` 那条拒绝信息原作「路径不在允许范围内」，是同函数四个拒绝分支里
      唯一不带上下文的；它的读者是 Agent，拿到后不知道该改哪个参数，只能原地重试或放弃。
-     现修成带上被拒路径 + 白名单。
+     现修成带上被拒路径 + 白名单。**判据：接收者拿这条消息能不能自纠？**
    - `imported but unused` → 先确认**全仓有没有人从本模块反向导入**它（可能是再导出），
      没有就删。**不要用 `# noqa: F401`**：那是 flake8 的功能，**pyflakes 根本不认**，
-     写了照报。两个例外写法：
+     写了照报；`from a import x as x` 那种显式再导出它同样不认。两个例外写法：
      - 真的是「导入即断言」（如 `tests/test_smoke_imports.py`）→ 用
        `importlib.import_module("x.y")`，把意图直写进代码，静态检查也读得懂。
      - 别留「给未来用」的转发：仓库里曾有一个 `extract_cited_sources` 的兼容再导出，
@@ -60,6 +54,18 @@
    - `assigned to but never used` → **重点看**。多半意味着「文案里写了、代码里没用」：
      曾有一个 `NEAR_MISS_RATIO` 只出现在评估面板的界面上，分类逻辑从没读过它 ——
      界面上因此写着一条根本不存在的分界线。
+
+   补充：**删"未使用导入"前要看行号，不能只 grep** —— `grep '\bos\.'` 会命中 docstring
+   里的说明文字，看着像在用，其实没在用。
+2. 全量测试全绿：
+   ```bash
+   pytest tests/ -q --ignore=tests/test_state_build.py --ignore=tests/test_smoke_imports.py
+   ```
+   （这两个文件被忽略是**环境问题**：本机隔离 venv 缺 langchain / langfuse，非代码问题。）
+3. 若动了首页 / README 文案，或改了 `src/config.py`、评估指标定义：
+   ```bash
+   pytest tests/test_app_homepage.py -q
+   ```
 4. `git commit`：提交信息用中文，写清「**问题 → 改动 → 测试/实测结果**」，与既有风格一致。
 5. `git push origin master`，然后**核对远程真实 hash**：
    ```bash
