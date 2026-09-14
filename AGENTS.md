@@ -36,13 +36,27 @@
    ```bash
    python -m pyflakes src/ pages/ app.py scripts/ tests/
    ```
-   **逐条判断，不追求零输出**。判断原则：
+   **要求零输出**。CI 里已挂成独立 job（`.github/workflows/ci.yml` 的 `lint`），
+   历史告警在 2026-09-14 清过一次（原 17 条），之后再现就是新引入的。
 
-   - `undefined name` / `redefinition` → **真问题，必须修**。这类错误能在一个后端路径里
-     潜很久：`_get_ollama_client` 里的 `OpenAIClient` 写成不存在的类名，云端全正常、
-     只有选 ollama 时 NameError，被宣传的离线能力一直是死的。
-   - `imported but unused` → 先看是不是**故意的 re-export**（本仓库有，带注释），
-     不是就删掉；删不掉的加 `# noqa: F401`。
+   原则：**每条都要归到下面某一类，不许为了让输出变干净而把语义掩盖掉。**
+
+   - `undefined name` / `redefinition` → **真问题，必须修**。这类错误能在一个后端分支里
+     潜很久：`_get_ollama_client` 把 `OpenAI` 写成不存在的 `OpenAIClient`，云端路径全正常、
+     只有选 ollama 时才 NameError，于是被宣传的「本地私有化 / 离线」一直是死的。
+     而且**测试覆盖不到它**——那条路径在本机跑不起来。
+   - `f-string is missing placeholders` → **先看它是不是漏了该填的值**，别直接删 `f`。
+     `src/tools/safety.py` 那条拒绝信息原作「路径不在允许范围内」，是同函数四个拒绝分支里
+     唯一不带上下文的；它的读者是 Agent，拿到后不知道该改哪个参数，只能原地重试或放弃。
+     现修成带上被拒路径 + 白名单。
+   - `imported but unused` → 先确认**全仓有没有人从本模块反向导入**它（可能是再导出），
+     没有就删。**不要用 `# noqa: F401`**：那是 flake8 的功能，**pyflakes 根本不认**，
+     写了照报。两个例外写法：
+     - 真的是「导入即断言」（如 `tests/test_smoke_imports.py`）→ 用
+       `importlib.import_module("x.y")`，把意图直写进代码，静态检查也读得懂。
+     - 别留「给未来用」的转发：仓库里曾有一个 `extract_cited_sources` 的兼容再导出，
+       注释写着"保持老路径可用"，但**加它的同一次提交**就把唯一的调用方改到了新路径
+       —— 它从未被任何人用过。
    - `assigned to but never used` → **重点看**。多半意味着「文案里写了、代码里没用」：
      曾有一个 `NEAR_MISS_RATIO` 只出现在评估面板的界面上，分类逻辑从没读过它 ——
      界面上因此写着一条根本不存在的分界线。
