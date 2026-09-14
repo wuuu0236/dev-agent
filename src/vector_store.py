@@ -65,6 +65,9 @@ def add_chunks(kb_id: str, chunks: list[dict], replace_source: bool = True):
     文件"等价于**替换**而不是叠加。必要的原因：chunk id 是 `{source}_chunk{i}`，
     重传修订版时若新文件更短（比如从 10 块变成 6 块），尾部 chunk6~9 的 id
     不会被覆盖，会作为旧内容永远留在库里被检索到。整库重建场景可传 False 省一次查询。
+
+    幂等性保证：向量一定先算完才动旧数据，所以任何一次 embedding 失败都不会
+    让已有内容受损（函数会直接抛异常，库里保持原样）。
     """
     if not chunks:
         return
@@ -72,13 +75,15 @@ def add_chunks(kb_id: str, chunks: list[dict], replace_source: bool = True):
     client = _get_client()
     collection = client.get_collection(_collection_name(kb_id))
 
+    # 先算向量、再删旧块——**顺序不能反**。反过来的话，embedding 调用一旦失败
+    # （网络抖动 / 额度用尽 / 超时），旧 chunk 已经删掉、新 chunk 又没写进去，
+    # 这份文档就彻底从库里消失了。整库重建会把这个隐患放大成"整个库没了"。
+    documents = [c["content"] for c in chunks]
+    embeddings = embed_texts(documents)
+
     if replace_source:
         for src in {c["source"] for c in chunks}:
             delete_chunks_by_source(kb_id, src)
-
-    # 使用 Embedding API 向量化
-    documents = [c["content"] for c in chunks]
-    embeddings = embed_texts(documents)
 
     ids = [f"{c['source']}_chunk{c['chunk_index']}" for c in chunks]
     metadatas = [

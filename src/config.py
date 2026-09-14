@@ -18,6 +18,22 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 for d in [DATA_DIR, CHROMA_DIR, UPLOAD_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+
+def kb_upload_dir(kb_id: str) -> Path:
+    """某个知识库的原始文件目录：`data/uploads/{kb_id}/`。
+
+    为什么按知识库分目录：不同知识库可能有同名文件（`README.md` 到处都是），
+    平铺在一个目录里会互相覆盖。
+
+    为什么原始文件要留存：**没有原文就没法重建索引**。改分块参数、换嵌入模型之后
+    想让老文档应用新规则，唯一的前提是原文还在——重新上传要求用户手上还有文件，
+    而重建索引只是一次计算。此前的实现把非图片文件在上传后直接删掉了，
+    等于永久放弃了这项能力（见 2026-09-14 的重建索引改造）。
+    """
+    d = UPLOAD_DIR / kb_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
 # --- LLM 配置 ---
 LLM_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 LLM_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")

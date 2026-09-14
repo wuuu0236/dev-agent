@@ -1,16 +1,13 @@
 """
 页面 2：文档上传
 """
-import os
-from pathlib import Path
 import streamlit as st
 from src.database import (list_kbs, add_document, update_document_status,
                           list_documents, delete_document)
 from src.parser import parse_file
 from src.chunker import chunk_parsed
-from src.vector_store import (add_chunks, create_collection, collection_count,
-                              delete_chunks_by_source)
-from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, UPLOAD_DIR, IMAGE_EXTENSIONS
+from src.vector_store import add_chunks, collection_count, delete_chunks_by_source
+from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, kb_upload_dir
 
 st.set_page_config(page_title="文档上传 - DataLens", page_icon="📄")
 
@@ -51,11 +48,17 @@ else:
             # 所有状态都允许删除。之前只放开 processing/error，结果是
             # "已成功入库的文档反而删不掉"——删文档是用户的正当诉求。
             if st.button("🗑️ 删除", key=f"del_{doc['id']}"):
-                # 必须两处一起删：SQLite 的元数据 + Chroma 的 chunk 内容。
-                # 只删前者会留下幽灵引用（列表里消失了，检索却还搜得到、
-                # 答案里还在引用它）。
+                # 必须三处一起删：Chroma 的 chunk、SQLite 的元数据、以及保留的原始文件。
+                # 只删元数据会留下幽灵引用（列表里消失了、检索却还搜得到、答案里还在引用它）；
+                # 不删原始文件则会让 data/uploads 越堆越多。
                 removed = delete_chunks_by_source(kb_id, doc["filename"])
                 delete_document(doc["id"])
+                src_file = kb_upload_dir(kb_id) / doc["filename"]
+                try:
+                    if src_file.exists():
+                        src_file.unlink()
+                except Exception:
+                    pass  # 文件删不掉不影响"文档已删除"这个结果
                 st.session_state["doc_msg"] = (
                     f"已删除 {doc['filename']}"
                     + (f"，同时清除 {removed} 个向量块" if removed else "（库中无对应向量块）")
@@ -94,9 +97,10 @@ if uploaded_files:
                 fail_count += 1
                 continue
 
-            # 保存到本地
-            file_path = UPLOAD_DIR / uf.name
-            ext = Path(uf.name).suffix.lower()
+            # 保存原始文件。**不再删除**——它是重建索引的唯一素材：改了分块参数或
+            # 换了嵌入模型之后，只有从原文重新切分才能让这份文档应用新规则。
+            # 按 kb_id 分目录，避免不同知识库的同名文件互相覆盖。
+            file_path = kb_upload_dir(kb_id) / uf.name
             with open(file_path, "wb") as f:
                 f.write(uf.getbuffer())
 
@@ -139,11 +143,6 @@ if uploaded_files:
                 st.error(f"❌ {uf.name} 处理失败: {str(e)}")
                 update_document_status(doc_id, "error")
                 fail_count += 1
-
-            finally:
-                # 清理临时文件；图片类保留原图，供视觉模型后续读取
-                if file_path.exists() and ext not in IMAGE_EXTENSIONS:
-                    os.remove(file_path)
 
         # 完成
         progress_bar.progress(1.0)
