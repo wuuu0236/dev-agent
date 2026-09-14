@@ -50,5 +50,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # 为什么单独一步：缺依赖时 pytest 只给一句 `Interrupted: N error during collection`
+      # 加 GitHub 的 `exit code 2`，看不出是哪个模块。这一步逐个 import 并打印版本，
+      # 把「没装上」和「装上了但导入就崩」分开报，一次列出全部问题（不 fail-fast）。
+      # 请参考 2026-09-14 的事故：test job 红了一个月，没人能说清原因。
+      - name: 依赖自检
+        run: python scripts/check_ci_deps.py
+
       - name: 跑冒烟测试
         run: python -m pytest tests/ -v
