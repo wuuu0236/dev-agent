@@ -10,6 +10,8 @@ Collection 命名规则：kb_{kb_id}
   - ids: chunk_{source}_{chunk_index} 唯一标识
 """
 import shutil
+import sys
+
 import chromadb
 from chromadb.config import Settings
 from src.config import CHROMA_DIR, EMBEDDING_DIM
@@ -52,18 +54,27 @@ def create_collection(kb_id: str):
     client.create_collection(name, metadata={"hnsw:space": "cosine"})
 
 
-def add_chunks(kb_id: str, chunks: list[dict]):
+def add_chunks(kb_id: str, chunks: list[dict], replace_source: bool = True):
     """
     将 chunk 列表写入向量库。
 
     chunks 格式：[{content, source, page, chunk_index}, ...]
     Chroma 会自动调用 embedding 函数把 content 转成向量。
+
+    replace_source=True（默认）：写入前先清掉同来源的旧 chunk，让"重传同一份
+    文件"等价于**替换**而不是叠加。必要的原因：chunk id 是 `{source}_chunk{i}`，
+    重传修订版时若新文件更短（比如从 10 块变成 6 块），尾部 chunk6~9 的 id
+    不会被覆盖，会作为旧内容永远留在库里被检索到。整库重建场景可传 False 省一次查询。
     """
     if not chunks:
         return
 
     client = _get_client()
     collection = client.get_collection(_collection_name(kb_id))
+
+    if replace_source:
+        for src in {c["source"] for c in chunks}:
+            delete_chunks_by_source(kb_id, src)
 
     # 使用 Embedding API 向量化
     documents = [c["content"] for c in chunks]
@@ -162,6 +173,36 @@ def delete_collection(kb_id: str):
     except Exception:
         pass
     _clear_query_cache(kb_id)
+
+
+def delete_chunks_by_source(kb_id: str, source: str) -> int:
+    """删除某个来源文件在向量库中的全部 chunk，返回实际删除条数。
+
+    为什么需要它：documents 表（SQLite）记录的只是元数据，chunk 内容存在
+    Chroma 里。只删 SQLite 不删 Chroma，会出现"文档从列表消失、内容却仍被
+    检索到并被引用"的幽灵引用——用户以为删干净了，答案里却还在引用它。
+
+    为什么按 metadata 的 source 删、而不是按 id 前缀删：chunk id 是
+    `{source}_chunk{i}`，看着能前缀匹配，但文件名含特殊字符、或同名文件互相
+    覆盖时会失准；source 是入库时写进 metadata 的精确值，过滤最可靠。
+    """
+    client = _get_client()
+    try:
+        collection = client.get_collection(_collection_name(kb_id))
+    except Exception:
+        return 0  # 库不存在 = 没有 chunk 要删，不视为错误
+    try:
+        got = collection.get(where={"source": source})
+        ids = got.get("ids") or []
+        if not ids:
+            return 0
+        collection.delete(ids=ids)
+        _clear_query_cache(kb_id)  # 内容变了，语义缓存作废
+        return len(ids)
+    except Exception as e:
+        print(f"[VectorStore] 按来源删除失败 source={source}: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        return 0
 
 
 def collection_count(kb_id: str) -> int:

@@ -86,7 +86,13 @@ RETRIEVE_CANDIDATES = int(os.getenv("RETRIEVE_CANDIDATES", "0"))
 # 另一个关键差别：reranker 的分数有绝对意义（实测相关 0.86 / 不相关 0.00002），
 # 而 RRF 分数 1/(60+rank) 无绝对意义——所以「相似度阈值拒答」应该建在
 # rerank 分数上，不是建在 RRF 分数上。
-RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() == "true"
+# 默认开启（2026-09-14 改为 true）——依据 2026-09-13 的 A/B 实测：
+#   同库同脚本（kb 83cd2d0c，27 条测试集），只切这一个开关：
+#   Recall@5 0.960→1.000 / Hit@5 0.960→1.000 / Hit@1 0.840→0.920 / MRR 0.887→0.960
+#   「未完全命中」列表清空，老大难 q05（答案在库里但排不到第一）被修复。
+# 代价：每次检索多一次 API 调用（延迟 + 费用）。要跑无精排的对照，
+# 设 RERANK_ENABLED=false，或评测时用 scripts/eval_retrieval.py --no-rerank。
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").lower() == "true"
 RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANK_API_KEY = os.getenv("RERANK_API_KEY", EMBEDDING_API_KEY)
 RERANK_API_BASE = os.getenv("RERANK_API_BASE", EMBEDDING_API_BASE)

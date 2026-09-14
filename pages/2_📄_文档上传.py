@@ -4,15 +4,22 @@
 import os
 from pathlib import Path
 import streamlit as st
-from src.database import list_kbs, add_document, update_document_status, list_documents
+from src.database import (list_kbs, add_document, update_document_status,
+                          list_documents, delete_document)
 from src.parser import parse_file
 from src.chunker import chunk_parsed
-from src.vector_store import add_chunks, create_collection, collection_count
+from src.vector_store import (add_chunks, create_collection, collection_count,
+                              delete_chunks_by_source)
 from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, UPLOAD_DIR, IMAGE_EXTENSIONS
 
 st.set_page_config(page_title="文档上传 - DataLens", page_icon="📄")
 
 st.title("📄 文档上传")
+
+# 删除等操作的反馈：st.rerun() 会冲掉瞬时的 success/error 消息，
+# 用一次性 session_state 标记把消息带到下一轮渲染。
+if _msg := st.session_state.pop("doc_msg", None):
+    st.success(_msg)
 
 # --- 选择知识库 ---
 kbs = list_kbs()
@@ -41,14 +48,19 @@ else:
         with col3:
             st.caption(doc["status"])
         with col4:
-            if doc["status"] in ("processing", "error"):
-                if st.button("🗑️ 删除", key=f"del_{doc['id']}"):
-                    from src.database import get_connection
-                    conn = get_connection()
-                    conn.execute("DELETE FROM documents WHERE id = ?", (doc['id'],))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
+            # 所有状态都允许删除。之前只放开 processing/error，结果是
+            # "已成功入库的文档反而删不掉"——删文档是用户的正当诉求。
+            if st.button("🗑️ 删除", key=f"del_{doc['id']}"):
+                # 必须两处一起删：SQLite 的元数据 + Chroma 的 chunk 内容。
+                # 只删前者会留下幽灵引用（列表里消失了，检索却还搜得到、
+                # 答案里还在引用它）。
+                removed = delete_chunks_by_source(kb_id, doc["filename"])
+                delete_document(doc["id"])
+                st.session_state["doc_msg"] = (
+                    f"已删除 {doc['filename']}"
+                    + (f"，同时清除 {removed} 个向量块" if removed else "（库中无对应向量块）")
+                )
+                st.rerun()
 
 st.divider()
 

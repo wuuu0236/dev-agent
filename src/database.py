@@ -128,6 +128,21 @@ def update_document_status(doc_id: str, status: str, chunk_count: int = 0):
     conn.close()
 
 
+def delete_document(doc_id: str) -> dict | None:
+    """删除文档记录，返回被删掉的记录（找不到则返回 None）。
+
+    注意这只是 SQLite 侧的一半。chunk 内容存在 Chroma 里，调用方必须配合
+    vector_store.delete_chunks_by_source(kb_id, filename) 一起清，
+    否则会留下"列表里没了、检索还能搜到"的幽灵引用。
+    """
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    conn.commit()
+    conn.close()
+    return dict(row) if row else None
+
+
 def list_documents(kb_id: str) -> list[dict]:
     """列出某个知识库的所有文档"""
     conn = get_connection()

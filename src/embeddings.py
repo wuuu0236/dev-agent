@@ -9,11 +9,24 @@ text2vec-base-chinese 模型，导致文档上传时进度条卡死。
 """
 import os
 import sys
+import time
+
 from openai import OpenAI
 from src.config import (
     EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL,
     EMBEDDING_BACKEND, OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL,
 )
+
+# --- 分批与重试 ---
+# 为什么要分批：原来是把整份文件的 chunk 一次性发给 API。一本 500 页 PDF 约
+# 2000 个 chunk，单请求体积、30s 超时、服务端限流三样随便撞一个就整体失败，
+# 而且失败后整篇文档标记 error、用户得重传。分批后每批规模可控，
+# 单批失败也只重试那一批。
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "64"))
+# 失败重试次数（含首次）。指数退避：1s → 2s。API 偶发 429/超时靠这个兜住。
+EMBED_MAX_RETRIES = int(os.getenv("EMBED_MAX_RETRIES", "3"))
+# 单批请求超时（秒）。按批给足时间，不再是一个固定 30s 卡死。
+EMBED_TIMEOUT = float(os.getenv("EMBED_TIMEOUT", "60"))
 
 # --- 查询侧指令前缀（BGE 系列专用）---
 # BGE 是"非对称"训练：query 与 passage 的编码方式不同，官方要求检索时给
@@ -51,21 +64,14 @@ def _get_ollama_embed_client() -> OpenAI:
     return _ollama_client
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """批量将文本转成向量。
-
-    EMBEDDING_BACKEND=cloud（默认）→ 硅基流动 API，零下载、秒级响应。
-    EMBEDDING_BACKEND=ollama        → 本地 Ollama embedding（nomic-embed-text 等），
-                                      实现完全离线建库、数据不出域。
-    """
-    if not texts:
-        return []
+def _embed_one_batch(texts: list[str]) -> list[list[float]]:
+    """单批向量化（不再分批）。云端失败会抛异常，由上层决定是否重试。"""
     if EMBEDDING_BACKEND == "ollama":
         print(f"[Embedding] 本地 Ollama，模型={OLLAMA_EMBED_MODEL}，文本数={len(texts)}",
               file=sys.stderr, flush=True)
         try:
             resp = _get_ollama_embed_client().embeddings.create(
-                model=OLLAMA_EMBED_MODEL, input=texts,
+                model=OLLAMA_EMBED_MODEL, input=texts, timeout=EMBED_TIMEOUT,
             )
             # Ollama 按输入顺序返回，直接取 embedding
             return [d.embedding for d in resp.data]
@@ -73,18 +79,61 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
             print(f"[Embedding] Ollama 失败，回退云端: {type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
             # 回退到云端，保证建库不中断
-    print(f"[Embedding] 调用 API，模型={EMBEDDING_MODEL}，文本数={len(texts)}，base_url={EMBEDDING_API_BASE}",
-          file=sys.stderr, flush=True)
-    try:
-        response = _client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=texts,
-        )
-        print(f"[Embedding] API 返回成功，向量数={len(response.data)}", file=sys.stderr, flush=True)
-        return [d.embedding for d in response.data]
-    except Exception as e:
-        print(f"[Embedding] API 调用失败: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        raise
+    response = _client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=texts,
+        timeout=EMBED_TIMEOUT,   # per-request 覆盖，按批给足时间
+    )
+    return [d.embedding for d in response.data]
+
+
+def _embed_with_retry(texts: list[str]) -> list[list[float]]:
+    """带指数退避的单批向量化。全部重试用尽才抛异常。"""
+    last_err: Exception | None = None
+    for attempt in range(1, EMBED_MAX_RETRIES + 1):
+        try:
+            return _embed_one_batch(texts)
+        except Exception as e:
+            last_err = e
+            if attempt < EMBED_MAX_RETRIES:
+                wait = 2 ** (attempt - 1)  # 1s → 2s
+                print(f"[Embedding] 第 {attempt}/{EMBED_MAX_RETRIES} 次失败"
+                      f"（{len(texts)} 条），{wait}s 后重试: {type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
+                time.sleep(wait)
+    print(f"[Embedding] 重试 {EMBED_MAX_RETRIES} 次仍失败，放弃本批: "
+          f"{type(last_err).__name__}: {last_err}", file=sys.stderr, flush=True)
+    raise last_err
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """批量将文本转成向量（自动分批 + 失败重试）。
+
+    EMBEDDING_BACKEND=cloud（默认）→ 硅基流动 API，零下载、秒级响应。
+    EMBEDDING_BACKEND=ollama        → 本地 Ollama embedding（nomic-embed-text 等），
+                                      实现完全离线建库、数据不出域。
+
+    分批保证单请求规模可控（EMBED_BATCH_SIZE），失败按批重试（EMBED_MAX_RETRIES），
+    任一批最终失败都会抛异常——调用方据此把文档标记为 error，避免"入库了一半"
+    却当作成功。
+    """
+    if not texts:
+        return []
+
+    if len(texts) <= EMBED_BATCH_SIZE:
+        return _embed_with_retry(texts)
+
+    batches = [texts[i:i + EMBED_BATCH_SIZE]
+               for i in range(0, len(texts), EMBED_BATCH_SIZE)]
+    print(f"[Embedding] 模型={EMBEDDING_MODEL}，共 {len(texts)} 条，"
+          f"分 {len(batches)} 批（每批 {EMBED_BATCH_SIZE}）", file=sys.stderr, flush=True)
+
+    out: list[list[float]] = []
+    for idx, batch in enumerate(batches, start=1):
+        out.extend(_embed_with_retry(batch))
+        print(f"[Embedding] 第 {idx}/{len(batches)} 批完成，累计 {len(out)} 条",
+              file=sys.stderr, flush=True)
+    return out
 
 
 def embed_single(text: str) -> list[float]:

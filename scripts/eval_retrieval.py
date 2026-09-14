@@ -44,8 +44,25 @@ def load_golden(path: Path) -> dict:
         return json.load(f)
 
 
-def evaluate(kb_id: str, cases: list, top_k: int, verbose: bool) -> dict:
-    """跑检索并计算指标。"""
+def top_score(results: list) -> float:
+    """取首位结果的相关性分数。
+
+    优先读精排分数（rerank_score）——因为开了精排之后，结果**就是按它排序的**，
+    再读 rrf_score 等于看一个跟顺序无关的数。精排关闭/降级时结果里没有该字段，
+    自然回退到粗排的 rrf_score，行为与改动前一致。
+    """
+    if not results:
+        return 0.0
+    r = results[0]
+    return r.get("rerank_score", r.get("rrf_score", 0.0))
+
+
+def evaluate(kb_id: str, cases: list, top_k: int, verbose: bool,
+             rerank: bool | None = None) -> dict:
+    """跑检索并计算指标。
+
+    rerank: True/False 显式指定精排开关（做 A/B），None 则跟随 config.RERANK_ENABLED。
+    """
     from src.hybrid_retriever import HybridRetriever
 
     retriever = HybridRetriever(kb_id)
@@ -56,7 +73,7 @@ def evaluate(kb_id: str, cases: list, top_k: int, verbose: bool) -> dict:
         expected = set(case.get("expected_sources") or [])
         is_negative = case.get("type") == "negative"
 
-        results = retriever.search(q, top_k=top_k)
+        results = retriever.search(q, top_k=top_k, rerank=rerank)
         got_sources = [r["source"] for r in results]
 
         # 命中的期望来源（按结果顺序）
@@ -66,7 +83,7 @@ def evaluate(kb_id: str, cases: list, top_k: int, verbose: bool) -> dict:
             recall = None
             rr = None
             hit_at_1 = None
-            top_score = results[0]["rrf_score"] if results else 0.0
+            score = top_score(results)
         else:
             recall = len(set(hits)) / len(expected) if expected else 0.0
             rr = 0.0
@@ -75,7 +92,7 @@ def evaluate(kb_id: str, cases: list, top_k: int, verbose: bool) -> dict:
                     rr = 1.0 / i
                     break
             hit_at_1 = 1.0 if (got_sources and got_sources[0] in expected) else 0.0
-            top_score = results[0]["rrf_score"] if results else 0.0
+            score = top_score(results)
 
         details.append({
             "id": case["id"],
@@ -86,7 +103,7 @@ def evaluate(kb_id: str, cases: list, top_k: int, verbose: bool) -> dict:
             "recall": recall,
             "mrr": rr,
             "hit@1": hit_at_1,
-            "top_score": top_score,
+            "top_score": score,
             "missed": sorted(expected - set(hits)) if not is_negative else [],
         })
 
@@ -115,7 +132,8 @@ def evaluate(kb_id: str, cases: list, top_k: int, verbose: bool) -> dict:
     return {"summary": summary, "details": details}
 
 
-def print_table(result: dict, top_k: int, kb_id: str, kb_name: str):
+def print_table(result: dict, top_k: int, kb_id: str, kb_name: str,
+                rerank: bool | None = None):
     s = result["summary"]
     print()
     print("=" * 56)
@@ -126,7 +144,11 @@ def print_table(result: dict, top_k: int, kb_id: str, kb_name: str):
     print(f"  Hit@{top_k}        {s[f'Hit@{top_k}']:.3f}   前 {top_k} 条内至少命中一个")
     print(f"  Hit@1         {s['Hit@1']:.3f}   第一条就命中")
     print(f"  MRR           {s['MRR']:.3f}   命中结果排名的倒数均值")
-    print(f"  负样本最高分  {s['negative_top_score_max']:.4f}  （RRF 分数无绝对意义，仅作相对参考）")
+    if rerank:
+        hint = "精排分数 0~1 有绝对意义，可直接做阈值拒答"
+    else:
+        hint = "RRF 分数 1/(60+rank) 无绝对意义，仅作相对参考"
+    print(f"  负样本最高分  {s['negative_top_score_max']:.4f}  （{hint}）")
     print("=" * 56)
 
     missed = [d for d in result["details"] if d["missed"]]
@@ -147,6 +169,13 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 条（调试用）")
     ap.add_argument("--compare", default=None, help="与历史结果 JSON 对比")
     ap.add_argument("--no-archive", action="store_true", help="不写存档文件")
+    # 精排开关：默认跟随 config.RERANK_ENABLED。做 A/B 时显式指定，避免"改了配置
+    # 默认值就再也测不出对照"的问题。
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument("--rerank", dest="rerank", action="store_true", default=None,
+                     help="强制开启精排")
+    grp.add_argument("--no-rerank", dest="rerank", action="store_false",
+                     help="强制关闭精排（跑无精排的对照基线）")
     args = ap.parse_args()
 
     golden = load_golden(Path(args.golden))
@@ -156,11 +185,16 @@ def main():
     if args.limit:
         cases = cases[: args.limit]
 
-    print(f"加载测试集: {args.golden}")
-    print(f"用例数 {len(cases)} | 知识库 {kb_id} | top_k={args.top_k}")
+    # 实际生效的精排开关（None 时读配置），存档里要记下来，否则两次结果没法归因
+    from src.config import RERANK_ENABLED
+    rerank_effective = RERANK_ENABLED if args.rerank is None else args.rerank
 
-    result = evaluate(kb_id, cases, args.top_k, args.verbose)
-    print_table(result, args.top_k, kb_id, kb_name)
+    print(f"加载测试集: {args.golden}")
+    print(f"用例数 {len(cases)} | 知识库 {kb_id} | top_k={args.top_k} | "
+          f"精排={'开' if rerank_effective else '关'}")
+
+    result = evaluate(kb_id, cases, args.top_k, args.verbose, rerank=args.rerank)
+    print_table(result, args.top_k, kb_id, kb_name, rerank_effective)
 
     # --- 与历史对比 ---
     if args.compare:
@@ -186,6 +220,7 @@ def main():
             "kb_id": kb_id,
             "kb_name": kb_name,
             "top_k": args.top_k,
+            "rerank": rerank_effective,
             "golden_set": str(args.golden),
             **result,
         }
