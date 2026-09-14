@@ -6,6 +6,20 @@ import pytest
 
 from src.reranker import rerank
 
+
+@pytest.fixture(autouse=True)
+def _assume_key_configured(monkeypatch):
+    """默认假定「已配置 RERANK_API_KEY」，让本文件的用例不依赖本机 .env。
+
+    为什么必须显式给：`rerank()` 在 `RERANK_API_KEY` 为空时会**提前返回粗排顺序**，
+    这一步早于 `_score_batch` —— 于是所有 monkeypatch 了打分函数的用例都会静默失效
+    （不是报「没配置」，而是断言莫名其妙地不成立）。
+    本地 `.env` 有 key 所以永远绿；CI 没有 → 2026-09-14 一次性红了 6 条。
+    「没 key 时降级」这个行为由 `test_missing_api_key_degrades` 显式覆盖（它自己把它置空）。
+    """
+    monkeypatch.setattr("src.reranker.RERANK_API_KEY", "test-key")
+
+
 CANDIDATES = [
     {"content": "文档 A", "source": "a.md"},
     {"content": "文档 B", "source": "b.md"},

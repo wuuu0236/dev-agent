@@ -29,6 +29,18 @@ class _FakeOpenAI:
         self.kw = kw
 
 
+@pytest.fixture(autouse=True)
+def _fake_client_by_default(rag, monkeypatch):
+    """默认把 `OpenAI` 换成替身，让本文件的用例不依赖本机 .env。
+
+    否则任何一个忘了 patch 的用例，都会真的去构造客户端 —— 在无凭据环境（CI）里
+    直接抛 `OpenAIError: Missing credentials`。本文件测的是**分派逻辑**（选哪个客户端、
+    哪个模型名、注入了什么消息），跟真实凭据无关，就不该被它拖住。
+    （凭据缺失该在**调用**时报错这一点，由 tests/test_import_no_credentials.py 守。）
+    """
+    monkeypatch.setattr(rag, "OpenAI", _FakeOpenAI)
+
+
 def test_ollama_backend_does_not_reference_a_nonexistent_class(rag, monkeypatch):
     """回归：`_get_ollama_client` 必须能用真名 OpenAI 构造出客户端（原来会 NameError）。"""
     monkeypatch.setattr(rag, "OpenAI", _FakeOpenAI)

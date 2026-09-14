@@ -32,6 +32,9 @@
    **凭据缺失该在调用时报错，而不是在 import 时报错——那是两件事。**
    守卫测试：`pytest tests/test_import_no_credentials.py`。
 
+   同一条原则也适用于**测试**：不许依赖本机有没有配 key。默认路径下要把外部调用替换成
+   替身（或在夹具里把 key 设成一个假值），把「没 key 时的降级行为」留一条用例显式覆盖。
+
 ## CI 红了怎么查
 
 CI 默认只给一句 `Process completed with exit code 2.`，按这个顺序拿原文：
@@ -94,11 +97,22 @@ push 不可逆。
 
    补充：**删"未使用导入"前要看行号，不能只 grep** —— `grep '\bos\.'` 会命中 docstring
    里的说明文字，看着像在用，其实没在用。
-2. 全量测试全绿：
+2. 全量测试全绿 —— **而且要在「没有凭据」的前提下也绿**：
    ```bash
+   # ① 本机正常跑
    pytest tests/ -q --ignore=tests/test_state_build.py --ignore=tests/test_smoke_imports.py
+
+   # ② 等价 CI（CI 上没有任何密钥）。变量显式置空即可，不用动 .env ——
+   #    load_dotenv() 默认不覆盖已存在的环境变量，所以置空不会被 .env 里的真值补回来。
+   EMBEDDING_API_KEY= DEEPSEEK_API_KEY= RERANK_API_KEY= LLM_API_KEY= \
+     pytest tests/ -q --ignore=tests/test_state_build.py --ignore=tests/test_smoke_imports.py
    ```
-   （这两个文件被忽略是**环境问题**：本机隔离 venv 缺 langchain / langfuse，非代码问题。）
+   （①②忽略的两个文件是**本机环境问题**：隔离 venv 缺 langchain / langfuse，非代码问题。）
+
+   **②不能省。** 本机 `.env` 里有真 key，所以「测试偷偷依赖凭据」这类问题本地永远看不出来：
+   2026-09-14 一次性暴露过 7 条 —— `rerank()` 在没 key 时会**提前返回粗排顺序**，
+   于是所有 monkeypatch 了打分函数的用例静默失效（6 条）；另 1 条忘了替换客户端，
+   真去构造 `OpenAI` 直接抛异常。**它们在本机全是绿的。**
 3. 若动了首页 / README 文案，或改了 `src/config.py`、评估指标定义：
    ```bash
    pytest tests/test_app_homepage.py -q
