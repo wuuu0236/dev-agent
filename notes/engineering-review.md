@@ -239,7 +239,7 @@ src/api/server.py:65                   default="C:/Users/24162/Desktop"
 |---|---|
 | `src/rag_agent.py` | **线上 Streamlit 的主力问答路径，零测试** |
 | `hybrid_retriever.py` 的 `search()` 全链路 | 只测了分词等零件，主流程没有直接测试 |
-| `parser.py` 的 docx 表格 | 已知会静默丢内容，零测试（见 7.3） |
+| `parser.py` 的 docx 表格 | 已知会静默丢内容，零测试（见 7.3）→ ✅ **2026-09-14 已修复**（`src/parser.py` 改为按阅读顺序迭代段落+表格，新增 23 条测试） |
 
 **结构性问题**：测试覆盖了"我新写的模块"，没覆盖"一直在用的主链路"。而主链路才是用户真正走的路。
 
@@ -259,6 +259,9 @@ full_text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 文档照样标记为 ready，用户看不到任何提示。表格是信息密度最高的部分，而且这类内容恰恰是 RAG 问答最常被问到的。
 
 **这个 bug 至今零测试覆盖**——CI 跑了全会通过。这是"测试存在但不覆盖真实风险"的典型。
+
+> ✅ **2026-09-14 已修复**：`parse_docx()` 改为按 `doc.element.body` 的真实阅读顺序迭代段落与表格，表格序列化为行式自包含文本（`- 列名：值；列名：值`）；新增 `tests/test_parser_docx.py`（23 条，含直接钉死本 bug 的回归测试）与端到端清洗验证。全量 213 passed。
+> 详见 `rag-six-stages.md` §11。**本节其余内容为当时的原始记录，未作改写。**
 
 ---
 
@@ -307,9 +310,9 @@ full_text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 | # | 动作 |
 |---|---|
-| 13 | 修 docx 表格丢失 + 补测试（**同时这是内容正确性问题，不是测试问题**） |
-| 14 | 给 `rag_agent.py` 主链路补测试（mock LLM 与检索） |
-| 15 | 给 `hybrid_retriever.search()` 补全链路测试 |
+| 13 | 修 docx 表格丢失 + 补测试（**同时这是内容正确性问题，不是测试问题**）→ ✅ **2026-09-14 完成**（commit 见 git log） |
+| 14 | 给 `rag_agent.py` 主链路补测试（mock LLM 与检索）→ ⚠️ 注：该模块已于同期更名为 `src/rag_qa.py` |
+| 15 | 给 `hybrid_retriever.search()` 补全链路测试 → ✅ **2026-09-14 完成**（`tests/test_hybrid_retriever.py`，13 条） |
 
 ---
 
