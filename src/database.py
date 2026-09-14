@@ -93,12 +93,29 @@ def get_kb(kb_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def _clear_answer_log(kb_id: str):
+    """删库时连带清掉该库的问答日志。惰性 import + 吞异常，与 vector_store 的
+    `_clear_query_cache` 同一套写法：日志是**旁路模块**，它导入失败 / 写不进去
+    都不能拖垮"删库"这条主路径。"""
+    try:
+        from src.answer_log import clear_kb_log
+        clear_kb_log(kb_id)
+    except Exception:
+        pass  # 日志模块不可用不影响删库
+
+
 def delete_kb(kb_id: str):
-    """删除知识库及其所有文档。CASCADE 自动删除关联的 documents 记录。"""
+    """删除知识库及其所有文档。CASCADE 自动删除关联的 documents 记录。
+
+    连带清掉该库的问答日志——知识库没了，引用它的日志就是孤儿数据，留着只会
+    让评估面板统计到一堆指向已删库的记录。清理放在这里（而不是调用方页面里）
+    是为了保证**任何**调用方都清得掉，不会漏。
+    """
     conn = get_connection()
     conn.execute("DELETE FROM knowledge_bases WHERE id = ?", (kb_id,))
     conn.commit()
     conn.close()
+    _clear_answer_log(kb_id)
 
 
 # --- 文档操作 ---

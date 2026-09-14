@@ -1,14 +1,20 @@
 """
-页面 4：RAGAS 评估面板（百分制 + 配置对比）
+页面 4：评估与反馈面板（RAGAS 百分制 + 配置对比 + 线上问答日志）
 
 为什么这个页面重要：
   面试官最想看的就是量化数据。「我做了一个 RAG」和
   「我的 RAG 在公开文档上 Precision 87%、Relevancy 83%」
   是完全不同的说服力。
 
-两种评估引擎：
-  · RAGAS（默认）—— 业界标准框架，0-100 百分制，支持「同一测试集多组配置对比」+ 历史存档
-  · 手写 LLM Judge（对照/教学）—— 自实现四维打分，与 RAGAS 同方法论，1-5 分 ×20 转百分制
+三块内容，对应三种不同来源的证据：
+  · 问答日志（线上真实提问）—— 用户问了什么、哪里没撑住。**不需要任何人操作**，
+    线上自然积累。回答"我的系统在真实使用中暴露了什么问题"。
+  · RAGAS 四维指标（0-100 百分制）—— 业界标准框架，回答"检索质量有多好"。
+  · 手写 LLM Judge（对照/教学）—— 自实现四维打分，与 RAGAS 同方法论，1-5 分 ×20
+    转百分制，用来对照两种引擎的结果。
+
+页面顺序是刻意的：**先线上、后测试集**。测试集是自己出的题，只能验证"改完有没有
+变好"，证明不了"该改哪里"；线上日志才能告诉你用户真正被什么卡住了。
 """
 import json
 import streamlit as st
@@ -93,6 +99,7 @@ st.set_page_config(page_title="评估面板 - DataLens", page_icon="📊")
 st.title("📊 检索质量评估")
 
 st.markdown("""
+- **问答日志**（线上真实提问）：自动记录每次问答的检索现场，分出「该调检索」和「该补文档」两类待办
 - **RAGAS 四维指标**（0-100 百分制）：Context Recall / Precision（检索质量）· Faithfulness（有无幻觉）· Answer Relevancy（是否切题）
 - **配置对比**：同一测试集跑多组 top_k，量化「调参到底有没有用」
 - **历史存档**：每次对比自动保存，可回看「上次 vs 这次」
@@ -176,6 +183,97 @@ compat, compat_msg = check_embedding_dim(kb_id)
 if not compat:
     st.error(f"⚠️ {compat_msg}")
 st.caption(f"📊 {stats['doc_count']} 个文档 | {stats['total_chunks']} 个 chunk")
+
+
+# ---------- 问答日志（线上真实提问 · 反馈环 P0）----------
+# 放在测试集之前，是刻意的顺序：先看「真实用户问倒了什么」（线上自然积累，
+# 不需要任何人点按钮），再用下面的测试集去验证"改了之后有没有变好"。
+# 反过来先跑测试集，就只是在自己出的题上自证——线上问不出来的问题，
+# 测试集里也不会有。
+
+st.divider()
+st.subheader("🕵️ 问答日志（线上真实提问）")
+st.caption(
+    "每次问答自动落一条现场快照：检索用了什么、最高相关度多少、门控有没有拦下。"
+    "**这是唯一不需要用户点任何按钮就能拿到的信号**——门槛越低，越不会漏。"
+)
+
+from src.answer_log import (  # noqa: E402  （局部导入：评估面板其余部分不依赖它）
+    gap_stats, list_answers, count_answers,
+    NEAR_MISS_RATIO, NO_NEIGHBOR_RATIO,
+)
+from src.config import RETRIEVAL_MIN_SCORE  # noqa: E402
+
+_log_total = count_answers(kb_id)
+if _log_total == 0:
+    st.caption("该库还没有问答记录。去「💬 智能问答」提几个问题，这里就会长出记录。")
+else:
+    _gap = gap_stats(kb_id)
+    _c1, _c2, _c3, _c4 = st.columns(4)
+    _c1.metric("问答总数", _gap["total"])
+    _c2.metric("有引用支撑", _gap["grounded"])
+    _c3.metric("未命中", _gap["ungrounded"])
+    _c4.metric("缓存命中", _gap["cache_hits"], help="命中语义缓存 = 没检索、没调模型；错答案会被缓存持续放大")
+
+    # 分档用的是**相对阈值**的比例，不是写死的绝对值 —— 阈值一调，分界线跟着走。
+    st.caption(
+        f"缺口分类（相对阈值 {RETRIEVAL_MIN_SCORE}）："
+        f"最高分 ≥ {RETRIEVAL_MIN_SCORE * NEAR_MISS_RATIO:.2f} 归「差点过阈」；"
+        f"< {RETRIEVAL_MIN_SCORE * NO_NEIGHBOR_RATIO:.2f} 归「库里没有语义邻居」"
+    )
+
+    def _gap_list(title: str, hint: str, items: list[dict]):
+        """一个档位一个折叠块：标题带数量，说明写清"下一步该干什么"。"""
+        import pandas as pd
+        with st.expander(f"{title}（{len(items)}）", expanded=bool(items)):
+            st.caption(hint)
+            if not items:
+                st.caption("（空）")
+                return
+            rows = [{
+                "时间": it["created_at"],
+                "用户问题": it["question"],
+                "最高相关度": "—" if it["gate_score"] is None else f"{it['gate_score']:.3f}",
+            } for it in items]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # 两类待办必须分开呈现 —— 它们看起来都是"没答上"，但下一步动作完全相反：
+    # 一类要调检索（纯计算、可反复试），一类要人工补文档（要去找资料）。
+    # 混在一起看，就会去调一个根本没调错的参数。
+    _gap_list(
+        "🎯 差点过阈 —— 该调检索，不用补文档",
+        "分块大小 / 混合检索权重 / 阈值都可能，改完用下面的测试集验证。"
+        "**先试这类**：调检索是纯计算、可反复试；补文档要人去找资料，成本高一个量级。",
+        _gap["near_miss"],
+    )
+    _gap_list(
+        "📄 库里没有语义邻居 —— 该补文档",
+        "分数低到连语义邻居都没有，说明库里大概率真没这段内容。"
+        "先去补齐资料再回头调检索 —— 对着空库调分块是白费功夫。",
+        _gap["no_neighbor"],
+    )
+    _gap_list(
+        "❔ 缓存命中且无引用 —— 缓存的是一段没依据的答案",
+        "命中了语义缓存 = 这次**根本没走检索**（所以没有分数可分类）。"
+        "这类要单独看：下次有人问同样的问题，缓存还会把这段没依据的答案再吐一遍。"
+        "该清缓存还是该补文档，取决于它当初为什么没通过门控。",
+        _gap["unreachable"],
+    )
+
+    with st.expander(f"📜 明细（最近 {min(_log_total, 50)} 条）"):
+        import pandas as pd
+        _rows = list_answers(kb_id, limit=50)
+        st.dataframe(pd.DataFrame([{
+            "id": r["id"],
+            "时间": r["created_at"],
+            "问题": r["question"],
+            "检索用 query": r["retrieval_query"],  # 追问消解后，能和用户原话比对
+            "过门控": "✅" if r["grounded"] else "⚠️",
+            "最高分": "—" if r["gate_score"] is None else f"{r['gate_score']:.3f}",
+            "缓存": "✅" if r["hit_cache"] else "",
+            "后端": r["backend"] or "",
+        } for r in _rows]), use_container_width=True, hide_index=True)
+        st.caption("单条展开看命中了哪几块？（P1 待做：单条详情 + 👍/👎 回标）")
 
 
 # ---------- 测试集 ----------

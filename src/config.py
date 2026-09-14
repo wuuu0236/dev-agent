@@ -153,6 +153,22 @@ QUERY_CACHE_ENABLED = os.getenv("QUERY_CACHE_ENABLED", "true").lower() == "true"
 QUERY_CACHE_THRESHOLD = float(os.getenv("QUERY_CACHE_THRESHOLD", "0.90"))  # 语义命中阈值
 QUERY_CACHE_MAX_PER_KB = 200  # 每知识库缓存上限（条），超限删最旧
 
+# --- 问答日志（反馈环 P0：黑匣子）---
+# 为什么需要：RAG 的失败**不可自证**——检索没命中、库里根本没有，模型不报错，
+# 它拿手里的低分上下文编一个读起来很通顺的答案。门控能挡住"整库都没有"，
+# 挡不住"库里有、只是没检索到"，而这两种失败在系统内部长得一模一样。
+# 没有现场快照，用户说"这条答错了"也无法归因——你看不到当时检索了什么、
+# 分数多少、门控有没有拦，等于什么都没说。
+# 独立价值（不需要用户点任何按钮）：grounded=0 的记录天然就是一份
+# 「用户问了、但库里的东西没撑住」的清单，按 gate_score 还能分成两类完全
+# 不同的待办——0.2~0.3 是"检索没调好"，<0.1 是"该补文档"。混在一起看，
+# 就会去调一个根本没调错的参数。
+# 关闭时行为与加日志之前完全一致（旁路，绝不阻断问答）。
+ANSWER_LOG_ENABLED = os.getenv("ANSWER_LOG_ENABLED", "true").lower() == "true"
+ANSWER_LOG_MAX_PER_KB = int(os.getenv("ANSWER_LOG_MAX_PER_KB", "500"))  # 每库上限，超限按规则淘汰
+ANSWER_LOG_MAX_HITS = int(os.getenv("ANSWER_LOG_MAX_HITS", "8"))        # 快照最多存几条命中（控制体积）
+ANSWER_LOG_HIT_CHARS = int(os.getenv("ANSWER_LOG_HIT_CHARS", "200"))    # 每条命中的原文片段长度
+
 # --- 混合检索（BM25 关键词 + 稠密向量 + RRF 融合）---
 # 为什么需要两路：
 #   · 稠密向量（双塔）擅长语义——问法和原文用词不同也能捞到。但对**专有名词**

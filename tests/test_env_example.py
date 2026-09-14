@@ -34,6 +34,7 @@ DEFAULT_ON_SWITCHES = [
     "VECTOR_WEIGHT",
     "ENABLE_OCR",              # 本地 OCR
     "QUERY_CACHE_ENABLED",     # 语义缓存
+    "ANSWER_LOG_ENABLED",      # 问答日志（会写 SQLite，需要能被关掉）
 ]
 
 
@@ -102,6 +103,22 @@ class TestRequiredKeysDocumented:
         """光有 key 不够——base_url 是另一家，必须一并给出才配得起来。"""
         assert "EMBEDDING_API_KEY" in EXAMPLE
         assert "EMBEDDING_API_BASE" in EXAMPLE
+
+
+class TestLogFamilyFullyDocumented:
+    """`ANSWER_LOG_*` 是一个整体：只写一半比一个都不写更迷惑。
+
+    使用者看到 `ANSWER_LOG_ENABLED=true` 会以为配额、快照大小都配好了，
+    实际上他调不了体积上限——库文件变大时不知道该改哪一行。
+    所以只要 config 里读了某个 `ANSWER_LOG_` 前缀的键，模板就必须有它。
+    """
+
+    def test_all_answer_log_vars_are_documented(self):
+        family = [k for k in re.findall(r'os\.getenv\(\s*"([A-Z0-9_]+)"', CONFIG_SRC)
+                  if k.startswith("ANSWER_LOG_")]
+        assert family, "config.py 里找不到 ANSWER_LOG_* 了？如果确实移除了，请同步删掉本测试"
+        missing = sorted(set(family) - set(EXAMPLE))
+        assert not missing, f"这些 ANSWER_LOG_* 键没写进 .env.example：{missing}"
 
 
 class TestNoAssignmentTraps:

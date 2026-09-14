@@ -18,12 +18,19 @@ RAG 问答主链路（确定性管道，**非 Agent**）
 
 对外 API：
   rag_query(kb_id, query, top_k, backend=None, vision_model=None, history=None)
-      -> {answer, sources, contexts, grounded, query, retrieval_query}
-  stream_rag_query(...) -> (答案生成器, sources, contexts, retrieval_query)
+      -> {answer, sources, contexts, grounded, query, retrieval_query, log_id}
+  stream_rag_query(...) -> (答案生成器, sources, contexts, retrieval_query, log_ref)
       · grounded=False（contexts 也为空）表示检索未达阈值，answer 是不依赖知识库的兜底回答
+      · log_ref 是可变容器 {"id": ...}：流式下返回时生成器还没跑，答案与日志 id
+        都要等 st.write_stream 跑完才能取到，只有容器能穿透（见 src/answer_log.py）
   extract_cited_sources(answer, contexts) -> [{source, page, type, snippets}]
       · 已迁至 `src/citations.py`（此处仅保留导入），好让引用逻辑脱离 langfuse 单独测试
   backend / vision_model 不传则读 config，保证已部署的云端 Demo 行为不变。
+
+问答现场快照（反馈环 P0，见 src/answer_log.py）：
+  每次问答落一条 answer_log；**快照在门控清空 contexts 之前抓**，否则事后无法
+  知道当时的最高分是 0.28（该调检索）还是 0.02（该补文档）——这两个数含义相反，
+  而它们在返回体里长得一模一样。写入是旁路，失败一律吞掉，绝不影响回答。
 """
 import sys
 
@@ -44,6 +51,8 @@ from src.answer_gate import is_grounded, top_score
 # 引用来源整理（按文档去重 + 附命中原文，让引用可核实）
 from src import citations
 from src.citations import extract_cited_sources  # re-export：保持 from src.rag_qa 的老路径可用
+# 问答现场快照（反馈环 P0）：旁路写入，纯 stdlib 无重依赖，可顶层 import
+from src import answer_log
 
 # 云端 DeepSeek 客户端（观测由 @observe 装饰器完成，不依赖 langfuse.openai）
 # 惰性创建：模块 import 不造客户端——没配 key 的环境（CI / 测试）也能 import，
@@ -68,6 +77,21 @@ def _get_ollama_client(base_url: str) -> OpenAI:
             api_key="ollama", base_url=base_url, timeout=120.0
         )
     return _ollama_clients[base_url]
+
+
+def _log_answer(**kw) -> int | None:
+    """写一条问答快照，返回日志 id。
+
+    双重保险：`answer_log.log_answer` 内部已全包 try/except，这里再包一层——
+    日志是**旁路**，它的存在不能成为用户拿不到回答的理由。调用点也不必到处写
+    try/except（本文件有 5 处写入点）。
+    """
+    try:
+        return answer_log.log_answer(**kw)
+    except Exception as e:
+        print(f"[AnswerLog] 写入失败（不影响回答）: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        return None
 
 
 SYSTEM_PROMPT = """你是一个基于知识库的问答助手。用户会提供「参考文档」和「问题」。
@@ -255,16 +279,30 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     contexts = retriever.search(retrieval_query, top_k=top_k)
 
     if not contexts:
+        answer = "知识库中没有找到相关内容，请先上传文档。"
+        # gate_score 记 0.0 而非 None：None 表示"压根没检索"（缓存命中），
+        # 这里确实检索了、只是一条都没搜到（典型是空库），两者不是一回事。
+        log_id = _log_answer(
+            kb_id=kb_id, question=query, retrieval_query=retrieval_query,
+            answer=answer, grounded=False, gate_score=0.0,
+            backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
+        )
         return {
-            "answer": "知识库中没有找到相关内容，请先上传文档。",
+            "answer": answer,
             "sources": [],
             "contexts": [],
             "grounded": False,
             "query": query,
             "retrieval_query": retrieval_query,
+            "log_id": log_id,
         }
 
     # 3. 门控：检索结果分数过低 → 清空上下文，如实说没找到（防幻觉，见 answer_gate）
+    # ⚠️ 快照必须在清空之前抓（反馈环 P0 的硬约束）：contexts = [] 之后，门控分数
+    # 就再也拿不到了——事后无法区分"0.28 差一点"和"0.02 库里根本没有"，而这两个数
+    # 指向完全相反的下一步动作。回归测试见 tests/test_answer_log.py。
+    gate_score = top_score(contexts)
+    ground_hits = answer_log.snapshot_hits(contexts)
     grounded = is_grounded(contexts)
     if not grounded:
         print(f"[AnswerGate] 检索最高分 {top_score(contexts):.4f} 低于阈值，"
@@ -278,26 +316,43 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # 5. 整理引用来源：按文档去重 + 附命中原文（用户展开即可核实，见 src/citations.py）
     sources = citations.unique_sources(contexts)
 
+    # 6. 落快照（旁路，失败不影响上面任何一步）
+    log_id = _log_answer(
+        kb_id=kb_id, question=query, retrieval_query=retrieval_query, answer=answer,
+        grounded=grounded, gate_score=gate_score, backend=backend or LLM_BACKEND,
+        hits=ground_hits,
+    )
+
     # contexts 一并返回：评估面板复用它做 LLM Judge，避免二次检索。
     # retrieval_query 是实际用于检索的 query（单轮时等于原 query，追问时是消解后的）,
     # 便于前端与排查时看清"检索到底拿什么去搜了"。
     # grounded=False 表示检索未达阈值：answer 是不依赖知识库的兜底回答，contexts 已清空。
+    # log_id 是本次问答在 answer_log 里的 id（P1 的 👍/👎 要靠它定位记录）。
     return {"answer": answer, "sources": sources, "contexts": contexts,
-            "grounded": grounded, "query": query, "retrieval_query": retrieval_query}
+            "grounded": grounded, "query": query, "retrieval_query": retrieval_query,
+            "log_id": log_id}
 
 
 def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                      backend: str | None = None,
                      vision_model: str | None = None,
                      history: list[dict] | None = None):
-    """流式版 RAG 查询。返回 (答案生成器, sources, contexts, retrieval_query)。
+    """流式版 RAG 查询。返回 (答案生成器, sources, contexts, retrieval_query, log_ref)。
 
     网页用 st.write_stream(gen) 渲染打字机效果；sources 用于展示引用来源。
     retrieval_query 是实际拿去检索的 query——单轮时等于用户原话，追问时是消解指代后的
     自包含问题，前端可据此把"检索用了什么"展示出来。
     rag_query（非流式）保留给评估面板使用。history 为最近对话轮次（多轮追问）。
+
+    log_ref：可变容器 `{"id": ...}`，装着本次问答在 answer_log 里的 id。
+    为什么用容器而不是直接返回 id：返回时生成器还没跑，答案尚不存在、日志也没写，
+    id 无从谈起。前端 `st.write_stream(gen)` 跑完后才能从容器里取到
+    （P1 的 👍/👎 按钮需要它做唯一 key）。缓存命中分支属于例外——当时就有答案，
+    所以返回时 id 已经填好。
     """
     from src.query_cache import get_cached_answer, cache_answer  # 模块顶层 import 无副作用（embedding 惰性）
+
+    log_ref: dict = {"id": None, "gate_score": None}
 
     # --- 语义缓存：无历史的独立提问先查缓存，命中直接秒回（不检索、不调模型）---
     # 命中时 sources 用缓存的引用来源；前端 display_sources = cited or sources 无缝兼容。
@@ -307,7 +362,18 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             def gen_cached():
                 yield cached["answer"]
 
-            return gen_cached(), cached["sources"], [], query
+            # 缓存命中也要记日志，而且这条信号价值特别高：它意味着"错的答案被缓存了，
+            # 会持续错下去"。注意两处语义——
+            #   · gate_score 记 None 而不是 0：这次**根本没检索**，0 会被误读成
+            #     "检索了但一分没得"（见 answer_log 的语义边界说明）。
+            #   · grounded 只能反推：缓存里带 sources 的回答，说明当时过了门控
+            #     （未过门控时 contexts 被清空、sources 必为空，二者等价）。
+            log_ref["id"] = _log_answer(
+                kb_id=kb_id, question=query, answer=cached["answer"],
+                grounded=bool(cached["sources"]), gate_score=None, hit_cache=True,
+                backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
+            )
+            return gen_cached(), cached["sources"], [], query, log_ref
 
     # 追问消解：历史 + 当前问题 → 自包含的检索 query（无历史 / 失败则原样返回）。
     # 注意只作用于检索——生成阶段仍用用户原话，历史另由 _prepare_generation 注入。
@@ -317,11 +383,22 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     contexts = retriever.search(retrieval_query, top_k=top_k)
 
     if not contexts:
-        return (iter(["知识库中没有找到相关内容，请先上传文档。"]), [], [], retrieval_query)
+        fallback = "知识库中没有找到相关内容，请先上传文档。"
+        log_ref["gate_score"] = 0.0
+        log_ref["id"] = _log_answer(
+            kb_id=kb_id, question=query, retrieval_query=retrieval_query,
+            answer=fallback, grounded=False, gate_score=0.0,
+            backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
+        )
+        return iter([fallback]), [], [], retrieval_query, log_ref
 
     # 门控：检索结果分数过低 → 清空上下文。既不喂给模型（防幻觉），也不作为
     # 引用来源展示（没有依据就没有引用）。前端据 contexts 为空显示"未命中"提示。
+    # ⚠️ 快照必须在清空之前抓（反馈环 P0 的硬约束，同 rag_query）。
+    gate_score = top_score(contexts)
+    ground_hits = answer_log.snapshot_hits(contexts)
     grounded = is_grounded(contexts)
+    log_ref["gate_score"] = gate_score
     if not grounded:
         print(f"[AnswerGate] 检索最高分 {top_score(contexts):.4f} 低于阈值，"
               f"转为无知识库支撑回答", file=sys.stderr, flush=True)
@@ -342,6 +419,16 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                 cache_answer(kb_id, query, full_answer, sources)
             except Exception:
                 pass  # 缓存失败不影响回答
+        # 快照放在生成之后一次写入（与 cache_answer 同处）。**不做两阶段写**
+        # （先 INSERT pending 再 UPDATE）的原因：Streamlit 流式生成在用户关页面时
+        # 抛 GeneratorExit，服务端不可靠捕获——两阶段写会留下永远 pending 的僵尸行，
+        # 反而制造"看起来像中断"的假数据。详见 notes/feedback-loop-plan.md §4.6。
+        if full_answer:
+            log_ref["id"] = _log_answer(
+                kb_id=kb_id, question=query, retrieval_query=retrieval_query,
+                answer=full_answer, grounded=grounded, gate_score=gate_score,
+                backend=backend or LLM_BACKEND, hits=ground_hits,
+            )
 
-    return gen(), sources, contexts, retrieval_query
+    return gen(), sources, contexts, retrieval_query, log_ref
 

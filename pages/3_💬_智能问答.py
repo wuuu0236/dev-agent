@@ -7,7 +7,7 @@ import streamlit as st
 from src.database import list_kbs, get_kb_stats
 from src.rag_qa import stream_rag_query
 from src.citations import extract_cited_sources
-from src.config import TOP_K_RETRIEVE
+from src.config import TOP_K_RETRIEVE, RETRIEVAL_MIN_SCORE
 
 st.set_page_config(page_title="智能问答 - DataLens", page_icon="💬")
 
@@ -120,7 +120,7 @@ if query := st.chat_input("输入你的问题..."):
             {"role": m["role"], "content": m["content"]}
             for m in st.session_state.messages[:-1] if m.get("content")
         ]
-        gen, sources, contexts, retrieval_query = stream_rag_query(
+        gen, sources, contexts, retrieval_query, log_ref = stream_rag_query(
             kb_id, query, top_k=TOP_K_RETRIEVE,
             backend=st.session_state.get("qa_backend", "cloud"),
             vision_model=st.session_state.get("qa_vision", ""),
@@ -137,8 +137,16 @@ if query := st.chat_input("输入你的问题..."):
 
         # 门控未通过（检索分数低于阈值）：这段回答不来自知识库，必须让用户知道，
         # 否则"没有依据的兜底回答"看起来和"有引用支撑的回答"一模一样。
-        if not contexts:
-            st.caption("⚠️ 未命中知识库（检索相关度低于阈值），以下回答不来自知识库文档")
+        # ⚠️ 判据是「contexts 与 sources 都为空」，不能只判 contexts：
+        # 缓存命中分支返回的 contexts 本来就是空（缓存只存了来源、没存上下文），
+        # 只看 contexts 会让**每一次缓存命中都误报"未命中知识库"**。
+        if not contexts and not sources:
+            # 把分数露出来：0.28 让人知道"差一点"（该调检索），0.02 让人知道
+            # "库里可能真没有"（该补文档）——比"没找到"三个字诚实，也是用户
+            # 判断下一步该做什么的唯一依据。
+            score = log_ref.get("gate_score")
+            detail = f"（最高相关度 {score:.2f}，低于阈值 {RETRIEVAL_MIN_SCORE}）" if score else ""
+            st.caption(f"⚠️ 未命中知识库{detail}，以下回答不来自知识库文档")
 
         # 引用映射：回答里的 [n] → 真实来源（防 LLM 编造文件名/页码）；
         # 回答没标引用时回退到全部检索来源。两种都由 _render_sources 展开看原文。
