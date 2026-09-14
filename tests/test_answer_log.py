@@ -15,11 +15,7 @@
 
 用临时 SQLite 库，不碰真库；不调 embedding / LLM。
 """
-import importlib.machinery
-import importlib.util
 import sqlite3
-import sys
-import types
 
 import pytest
 
@@ -214,6 +210,27 @@ def test_gap_stats_splits_into_actionable_buckets(log):
     assert g["near_miss"][0]["gate_score"] == pytest.approx(0.25)
 
 
+def test_no_neighbor_boundary_is_exact(log):
+    """线内线外一分之差就换档（线本身的取值理由见 answer_log 模块顶部）。
+
+    这个测试同时守住"分界线只有一个"：曾经有个 NEAR_MISS_RATIO 常量只出现在
+    界面文案里、代码从未读过——那正是最容易被当成小毛病放过的一类问题
+    （界面上写着一条不存在的边界）。
+    """
+    line = al.RETRIEVAL_MIN_SCORE * al.NO_NEIGHBOR_RATIO
+    assert 0 < al.NO_NEIGHBOR_RATIO < 1, "比例必须落在 (0,1)，否则分界线跑出阈值外"
+
+    on_line = al.log_answer("kb1", "刚压线", "a", grounded=False, gate_score=line)
+    below = al.log_answer("kb1", "线下", "a", grounded=False, gate_score=line * 0.9)
+
+    g = al.gap_stats("kb1")
+    assert [it["id"] for it in g["near_miss"]] == [on_line]
+    assert [it["id"] for it in g["no_neighbor"]] == [below]
+
+    # 两档合起来必须覆盖所有"有分数"的未命中记录，不能有记录凭空消失
+    assert g["ungrounded"] == len(g["near_miss"]) + len(g["no_neighbor"]) + len(g["unreachable"])
+
+
 def test_empty_retrieval_is_not_unreachable(log):
     """检索结果为空记的是 0.0（真检索了、一条没捞到）→ 归 no_neighbor。
 
@@ -287,41 +304,8 @@ def _conn_to(db_file):
 
 
 # ---------- 端到端：抓取点必须在门控之前 ----------
-
-def _ensure_langfuse() -> None:
-    """缺 langfuse 时注入一个最小替身（只提供 @observe 直通）。
-
-    为什么不像 test_smoke_imports 那样直接 import：本文件要守的是**主链路行为**
-    回归（快照抓取点、旁路不阻断），属于任何环境都该跑得起来的一类。
-    为缺一个观测 SDK 而整文件跳过，等于这两条约束没人守。
-    ⚠️ 只在真的缺 langfuse 时注入 —— 装了就用真的，避免替身掩盖真问题。
-    ⚠️ 判"在不在"必须先看 `sys.modules`，不能用 `find_spec`：替身进过 sys.modules
-    之后再调 find_spec 会因为 `__spec__ is None` 抛 ValueError（而不是返回 None），
-    第二个用到它的测试就崩了。
-    """
-    if "langfuse" in sys.modules:
-        return
-    try:
-        import langfuse  # noqa: F401  装了就用真的
-        return
-    except ImportError:
-        pass
-
-    def observe(*a, **kw):
-        if a and callable(a[0]):
-            return a[0]
-        return lambda fn: fn
-
-    pkg = types.ModuleType("langfuse")
-    dec = types.ModuleType("langfuse.decorators")
-    dec.observe = observe
-    pkg.decorators = dec
-    # 补上 __spec__：任何第三方代码用 find_spec 探测时不会因为它是"裸模块"而报错
-    pkg.__spec__ = importlib.machinery.ModuleSpec("langfuse", None)
-    dec.__spec__ = importlib.machinery.ModuleSpec("langfuse.decorators", None)
-    sys.modules["langfuse"] = pkg
-    sys.modules["langfuse.decorators"] = dec
-
+# 主链路要 import rag_qa（依赖 langfuse），用 conftest 的 stub_langfuse 夹具补缺；
+# 本文件守的是**主链路行为**回归，属于任何环境都该跑得起来的一类。
 
 # 最高 0.28 < 默认阈值 0.3 → 必然被门控拦下，且分数是"差一点"那一档（>0）
 _LOW_CONTEXTS = [
@@ -333,9 +317,8 @@ _LOW_CONTEXTS = [
 
 
 @pytest.fixture
-def rag(log, monkeypatch):
+def rag(log, monkeypatch, stub_langfuse):
     """rag_qa 主链路，检索与生成都换成假的（不碰 API / 不碰真库）。"""
-    _ensure_langfuse()
     import src.rag_qa as rag_qa
     import src.query_cache as qc
 

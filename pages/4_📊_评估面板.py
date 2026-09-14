@@ -19,7 +19,7 @@
 import json
 import streamlit as st
 from src.database import list_kbs, get_kb_stats
-from src.vector_store import collection_count, check_embedding_dim
+from src.vector_store import check_embedding_dim
 
 # 演示测试集（基于 LangChain 公开文档，题型覆盖定义/对比/推理/应用/刁钻/细节）
 DEMO_QUESTIONS = [
@@ -199,8 +199,7 @@ st.caption(
 )
 
 from src.answer_log import (  # noqa: E402  （局部导入：评估面板其余部分不依赖它）
-    gap_stats, list_answers, count_answers,
-    NEAR_MISS_RATIO, NO_NEIGHBOR_RATIO,
+    gap_stats, list_answers, count_answers, NO_NEIGHBOR_RATIO,
 )
 from src.config import RETRIEVAL_MIN_SCORE  # noqa: E402
 
@@ -215,11 +214,13 @@ else:
     _c3.metric("未命中", _gap["ungrounded"])
     _c4.metric("缓存命中", _gap["cache_hits"], help="命中语义缓存 = 没检索、没调模型；错答案会被缓存持续放大")
 
-    # 分档用的是**相对阈值**的比例，不是写死的绝对值 —— 阈值一调，分界线跟着走。
+    # 分界线只有一条，且用**相对阈值**的比例算 —— 阈值一调，分界线跟着走。
+    # 这里显示的必须是代码真正在用的那条线（曾经写过一个界面上有、代码里没有的
+    # 边界，正是这类"文案与实现脱节"最容易被当成小毛病放过去）。
     st.caption(
-        f"缺口分类（相对阈值 {RETRIEVAL_MIN_SCORE}）："
-        f"最高分 ≥ {RETRIEVAL_MIN_SCORE * NEAR_MISS_RATIO:.2f} 归「差点过阈」；"
-        f"< {RETRIEVAL_MIN_SCORE * NO_NEIGHBOR_RATIO:.2f} 归「库里没有语义邻居」"
+        f"缺口分类（门控阈值 {RETRIEVAL_MIN_SCORE}）："
+        f"最高分 < {RETRIEVAL_MIN_SCORE * NO_NEIGHBOR_RATIO:.2f} 归「库里没有语义邻居」"
+        f"（该补文档）；其余未命中的归「差点过阈」（该调检索），按分数从高到低排"
     )
 
     def _gap_list(title: str, hint: str, items: list[dict]):

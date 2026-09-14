@@ -72,8 +72,16 @@ _ollama_clients = {}
 
 
 def _get_ollama_client(base_url: str) -> OpenAI:
+    """取本地 Ollama 的 OpenAI 兼容客户端。
+
+    ⚠️ 这里原先写的是 `OpenAIClient(...)`——**这个类在本文件里根本不存在**
+    （只 import 了 `OpenAI`）。后果是：只要选 `ollama` 后端，第一次调用就
+    NameError，整条"本地私有化 / 离线"路径一用就崩，而云端路径完全正常，
+    所以一直没被发现。同类错字在静态检查缺位时能活很久——这也是它现在
+    必须留一条注释的原因：改回来之前先看一眼这里。
+    """
     if base_url not in _ollama_clients:
-        _ollama_clients[base_url] = OpenAIClient(
+        _ollama_clients[base_url] = OpenAI(
             api_key="ollama", base_url=base_url, timeout=120.0
         )
     return _ollama_clients[base_url]

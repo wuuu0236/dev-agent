@@ -44,13 +44,27 @@ from src.config import (
 
 _TABLE = "answer_log"
 
-# 缺口分类的档位边界（相对阈值，不是绝对值）。
-# 为什么用比例而不是写死 0.20 / 0.10：阈值本身是可配的（RETRIEVAL_MIN_SCORE）。
-# 写死绝对值的话，一旦把阈值从 0.3 调到 0.5，"差点过阈"和"连邻居都没有"的
-# 分界线就会静默失效——分类全乱，而你不会收到任何提示。
-# 这两个比例在默认阈值 0.3 下正好复现 0.195 / 0.099，与实测分布吻合。
-NEAR_MISS_RATIO = 0.65     # gate_score >= 阈值 * 该比例 → 「差一点」
-NO_NEIGHBOR_RATIO = 0.33   # gate_score <  阈值 * 该比例 → 「连语义邻居都没有」
+# 缺口分类的分界线（相对阈值，不是绝对值）。
+# 为什么用比例而不是写死 0.10：阈值本身是可配的（RETRIEVAL_MIN_SCORE）。
+# 写死绝对值的话，一旦把阈值从 0.3 调到 0.5，分界线就会静默失效——分类全乱，
+# 而你不会收到任何提示。
+#
+# ⚠️ 只有**一条**线（0.33 × 阈值 = 默认 0.099），不是两条。曾有一个
+# NEAR_MISS_RATIO=0.65 在这里，但分类逻辑其实只用到这一条（中间地带归「差一点」，
+# 理由见 gap_stats），那个常量谁也没读——是死配置。已删除，免得界面上写出
+# 一个代码里根本不存在的边界。
+#
+# 0.33 这个值不是拍的，落在实测分布的空档里（见 answer_gate 的实测记录）：
+#   · 库里有答案：最低 0.578（≈ 1.9 × 阈值）
+#   · 库里没有 / 不该问库：0.001 ~ 0.125（"你好" 0.125、"1+1" 0.091、
+#     "帮我写首诗" 0.010、"今天天气" 0.001）
+# 线取 0.099，正好把「0.00x 那一片」和「0.12x 及以上」分开：前者是压根没沾到边
+# （该补文档），后者多少沾了点边（可能只是没检索好）。
+#
+# 已知局限（诚实标注）：0.12 左右的"你好""你能做什么"这类**本就不该问库**的问题
+# 会落进「差一点」，被读成"该调检索"。它们在清单里排最后（按分降序），
+# 目前靠人一眼看出；要做干净得靠意图路由，那不在 P0 范围。
+NO_NEIGHBOR_RATIO = 0.33   # gate_score < 阈值 * 该比例 → 「连语义邻居都没有」
 
 
 def _connect():
@@ -242,15 +256,8 @@ def gap_stats(kb_id: str | None = None) -> dict:
       no_neighbor   —— 连语义邻居都没有：该补文档
       unreachable   —— 没有分数可比，不参与分类
 
-    三档的边界严格来说是这么落地的：
-      · `gate_score IS NULL` → unreachable。目前只有缓存命中会走到这里
-        （**没走检索**，无从打分）。注意"检索结果为空"走的是另一条路：
-        `rag_qa` 在那里记 0.0 而不是 NULL，于是它落进 no_neighbor —— 这符合
-        语义："真检索了，一条都没捞到"。
-      · 只有**未过门控**（grounded=0）的记录才进这三档。过了门控的缓存命中不算
-        缺口——它当时是有依据的。
-
-    分类边界见模块顶部的 NEAR_MISS_RATIO / NO_NEIGHBOR_RATIO。
+    分界线只有一条（`NO_NEIGHBOR_RATIO × RETRIEVAL_MIN_SCORE`，默认 0.099），
+    边界为什么取这个值见模块顶部。
     """
     _init_table()
     conn = _connect()
@@ -262,9 +269,7 @@ def gap_stats(kb_id: str | None = None) -> dict:
     rows = conn.execute(sql, args).fetchall()
     conn.close()
 
-    threshold = RETRIEVAL_MIN_SCORE
-    near_line = threshold * NEAR_MISS_RATIO
-    none_line = threshold * NO_NEIGHBOR_RATIO
+    none_line = RETRIEVAL_MIN_SCORE * NO_NEIGHBOR_RATIO
 
     stats = {
         "total": len(rows), "grounded": 0, "ungrounded": 0, "cache_hits": 0,
@@ -281,16 +286,16 @@ def gap_stats(kb_id: str | None = None) -> dict:
         item = {"id": r["id"], "question": r["question"],
                 "gate_score": score, "created_at": r["created_at"]}
         if score is None:
-            # 没检索（缓存命中）或检索结果为空 —— 没有分数可比，别硬归类
+            # 没走检索（缓存命中）—— 没有分数可比，别硬归类
             stats["unreachable"].append(item)
         elif score < none_line:
             stats["no_neighbor"].append(item)
         else:
-            # 剩下的一律归「差点过阈」，**包括 near_line 与 none_line 之间的
-            # 中间地带**。取舍理由：中间地带无法断定"库里真没有"，而两类待办的
-            # 成本不对称——调检索是纯计算、可反复试；补文档要人去找资料。
-            # 不确定时选更轻的那个，避免把一个可能检索修好的问题误判成"缺文档"
-            # 而白补一堆资料。
+            # 剩下的（含"刚过线"到"就差一点"的整个区间）一律归「差点过阈」。
+            # 取舍理由：这条线以上无法断定"库里真没有"，而两类待办的成本不对称
+            # ——调检索是纯计算、可反复试；补文档要人去找资料。不确定时选更轻的
+            # 那个，避免把一个可能检索修好的问题误判成"缺文档"而白补一堆资料。
+            # 列表按分数降序（下面 sort），越接近阈值的越靠前，先看最可能修好的。
             stats["near_miss"].append(item)
     # 差点过的排前面（更接近修好），缺内容的按时间倒序
     stats["near_miss"].sort(key=lambda x: (x["gate_score"] is None, -(x["gate_score"] or 0)))
