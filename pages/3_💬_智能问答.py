@@ -105,6 +105,11 @@ if query := st.chat_input("输入你的问题..."):
         if retrieval_query and retrieval_query != query:
             st.caption(f"🔍 追问消解后的检索用查询：{retrieval_query}")
 
+        # 门控未通过（检索分数低于阈值）：这段回答不来自知识库，必须让用户知道，
+        # 否则"没有依据的兜底回答"看起来和"有引用支撑的回答"一模一样。
+        if not contexts:
+            st.caption("⚠️ 未命中知识库（检索相关度低于阈值），以下回答不来自知识库文档")
+
         # 引用映射：回答里的 [n] → 真实来源（防 LLM 编造文件名/页码）；
         # 回答没标引用时回退到全部检索来源
         cited = extract_cited_sources(answer, contexts) if contexts else []
