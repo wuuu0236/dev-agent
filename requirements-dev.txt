@@ -5,12 +5,19 @@
 #
 # ⚠️ 2026-09-14 纠正一处**已失效的假设**（CI 因此红了一个月，见下）：
 #    原文写着「chromadb 靠惰性 import（见 src/hybrid_retriever.py），测试不 import 它」。
-#    实际上惰性只发生在 hybrid_retriever 里：`src/vector_store.py:14` 是**模块级**
-#    `import chromadb`，`src/parser.py:21` 是**模块级** `from docx import Document`。
-#    于是 tests/ 里任何 import 到这两个模块的文件，都会在**收集阶段**就 ImportError
-#    （pytest 退出码 2，整个 job 直接失败，连别的测试都不会跑）。
+#    实际上惰性只发生在 hybrid_retriever 里，下面这几个都是**模块级** import：
+#      src/vector_store.py:14  import chromadb
+#      src/parser.py:20        import fitz    (PyMuPDF)
+#      src/parser.py:21-23     from docx import ...
+#    于是 tests/ 里任何 import 到这些模块的文件，都会在**收集阶段**就 ImportError
+#    （pytest 退出码 2，整个 job 直接失败，连别的测试都不会跑）：
+#      test_document_delete.py → src.vector_store → chromadb
+#      test_parser_docx.py     → src.parser       → fitz / docx
+#      test_reindex.py         → src.parser       → fitz / docx
 # → **判断一个包该不该在这里，依据不是"装起来快不快"，而是"测试有没有 import 到它"。**
-#   改了 tests/ 的 import 之后，请重新对一遍这个清单。
+#   ⚠️ 别只看测试文件自己那几行 import —— 要**顺着 src 追进去**。第一次修就漏了
+#   `src.parser` 里的 fitz（只看了测试文件顶部的 docx），结果 CI 照样红。
+#   查法：把 tests/ 里被收集到的文件，做一遍「模块级 import 闭包」，再逐个对照本文件。
 langgraph>=0.2.0,<1.0
 langchain>=0.3.0,<1.0
 langchain-core>=0.3.0,<1.0
@@ -22,9 +29,10 @@ rank-bm25>=0.2.2
 jieba>=0.42.0
 langfuse>=2.50.0,<2.51.0
 pytest>=7.0
-# 被 src.vector_store / src.parser 在模块级 import，测试要能收集就必须有。
+# 以下三个被 src.vector_store / src.parser 在**模块级** import，测试要能收集就必须有。
 # 版本下限与 requirements.txt 对齐，避免 CI 与线上跑在不同大版本上。
 chromadb>=0.4.0
+PyMuPDF>=1.23.0
 python-docx>=1.0.0
 # 静态检查：只报「未定义名 / 未使用导入 / 重复定义」，不带风格规则噪音。
 # 引入它是因为一个真实事故：`_get_ollama_client` 里把 `OpenAI` 写成了不存在的
