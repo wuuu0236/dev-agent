@@ -72,6 +72,11 @@ CHUNK_PATH_MAXLEN = int(os.getenv("CHUNK_PATH_MAXLEN", "120"))  # 路径前缀�
 TOP_K_RETRIEVE = 5     # 检索返回的文档数
 RAG_HISTORY_TURNS = 6  # 注入的最近对话条数（按消息条数切，非严格"轮"；Web 与 API 两条路径一致）
 
+# 引用来源展示的原文片段长度（字符）。
+# 为什么要有：引用只写"文件名 + 页码"是没法核实的——用户看不到原文，也就无从判断
+# 模型是在照实回答还是在拿别的内容硬编。带上命中原文，引用才真的可验证。
+SOURCE_SNIPPET_CHARS = int(os.getenv("SOURCE_SNIPPET_CHARS", "300"))
+
 # 候选池大小：粗排阶段先捞多少条给精排用。
 # 这是「粗排 → 精排」架构的前提——召回只取 top_k 的话，精排再准也只能
 # 从这几条里挑；必须先多捞，精排才有发挥空间。

@@ -1,14 +1,48 @@
 """
 页面 3：智能问答
 """
+import re
+
 import streamlit as st
 from src.database import list_kbs, get_kb_stats
-from src.rag_qa import stream_rag_query, extract_cited_sources
+from src.rag_qa import stream_rag_query
+from src.citations import extract_cited_sources
 from src.config import TOP_K_RETRIEVE
 
 st.set_page_config(page_title="智能问答 - DataLens", page_icon="💬")
 
 st.title("💬 智能问答")
+
+
+# --- 引用来源渲染 ---
+# 引用原文里可能带 markdown 特殊字符（#、*、> 等），转义后才能原样展示；
+# 换行压成空格，避免把一段引用拆成多个 blockquote。
+_MD_SPECIAL = re.compile(r"([\\*_`#\[\]|>])")
+
+
+def _plain(text: str) -> str:
+    return _MD_SPECIAL.sub(r"\\\1", (text or "").replace("\n", " "))
+
+
+def _render_sources(sources: list) -> None:
+    """渲染引用来源：文档名 + 页码 + 命中原文。
+
+    此前只显示「文件名 + 页码」——用户看不到原文，也就无从判断模型是在照实回答、
+    还是在拿别的内容硬编。**「验证」是产品闭环里最容易断的一环**，这里把它接上：
+    展开引用就能逐句对照原文。
+    """
+    with st.expander(f"📖 引用来源（{len(sources)} 个文档）"):
+        for s in sources:
+            page_info = f" — 第{s['page']}页" if s.get("page") else ""
+            badge = " 🖼️" if s.get("type") == "image" else ""
+            snippets = s.get("snippets") or []
+            if not snippets:
+                # 旧缓存里的来源没有片段字段，退回旧展示（向后兼容）
+                st.caption(f"• {s['source']}{page_info}{badge}")
+                continue
+            st.markdown(f"**{s['source']}**{page_info}{badge}")
+            for snip in snippets:
+                st.markdown(f"> {_plain(snip)}")
 
 
 # --- 缓存：知识库列表 / 统计 ---
@@ -69,11 +103,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("sources"):
-            with st.expander("📖 引用来源"):
-                for s in msg["sources"]:
-                    page_info = f" — 第{s['page']}页" if s.get("page") else ""
-                    badge = " 🖼️" if s.get("type") == "image" else ""
-                    st.caption(f"• {s['source']}{page_info}{badge}")
+            _render_sources(msg["sources"])
 
 # --- 输入区 ---
 if query := st.chat_input("输入你的问题..."):
@@ -111,15 +141,11 @@ if query := st.chat_input("输入你的问题..."):
             st.caption("⚠️ 未命中知识库（检索相关度低于阈值），以下回答不来自知识库文档")
 
         # 引用映射：回答里的 [n] → 真实来源（防 LLM 编造文件名/页码）；
-        # 回答没标引用时回退到全部检索来源
+        # 回答没标引用时回退到全部检索来源。两种都由 _render_sources 展开看原文。
         cited = extract_cited_sources(answer, contexts) if contexts else []
         display_sources = cited or sources
         if display_sources:
-            with st.expander("📖 引用来源"):
-                for s in display_sources:
-                    page_info = f" — 第{s['page']}页" if s.get("page") else ""
-                    badge = " 🖼️" if s.get("type") == "image" else ""
-                    st.caption(f"• {s['source']}{page_info}{badge}")
+            _render_sources(display_sources)
 
     st.session_state.messages.append({
         "role": "assistant",

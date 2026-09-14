@@ -21,9 +21,10 @@ RAG 问答主链路（确定性管道，**非 Agent**）
       -> {answer, sources, contexts, grounded, query, retrieval_query}
   stream_rag_query(...) -> (答案生成器, sources, contexts, retrieval_query)
       · grounded=False（contexts 也为空）表示检索未达阈值，answer 是不依赖知识库的兜底回答
+  extract_cited_sources(answer, contexts) -> [{source, page, type, snippets}]
+      · 已迁至 `src/citations.py`（此处仅保留导入），好让引用逻辑脱离 langfuse 单独测试
   backend / vision_model 不传则读 config，保证已部署的云端 Demo 行为不变。
 """
-import re
 import sys
 
 from langfuse.decorators import observe
@@ -40,6 +41,9 @@ from src.hybrid_retriever import HybridRetriever
 from src.query_rewrite import rewrite_query
 # 检索质量门控：精排分数低于阈值时不注入上下文，如实说"不知道"（防幻觉）
 from src.answer_gate import is_grounded, top_score
+# 引用来源整理（按文档去重 + 附命中原文，让引用可核实）
+from src import citations
+from src.citations import extract_cited_sources  # re-export：保持 from src.rag_qa 的老路径可用
 
 # 云端 DeepSeek 客户端（观测由 @observe 装饰器完成，不依赖 langfuse.openai）
 # 惰性创建：模块 import 不造客户端——没配 key 的环境（CI / 测试）也能 import，
@@ -271,24 +275,14 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     answer = generate_answer(query, contexts, backend=backend, vision_model=vision_model,
                              history=history, grounded=grounded)
 
-    # 5. 去重引用来源（图片块也带上类型标记，便于前端展示）
-    seen = set()
-    unique_sources = []
-    for c in contexts:
-        key = c["source"]
-        if key not in seen:
-            seen.add(key)
-            unique_sources.append({
-                "source": c["source"],
-                "page": c.get("page", 0),
-                "type": c.get("type", "text"),
-            })
+    # 5. 整理引用来源：按文档去重 + 附命中原文（用户展开即可核实，见 src/citations.py）
+    sources = citations.unique_sources(contexts)
 
     # contexts 一并返回：评估面板复用它做 LLM Judge，避免二次检索。
     # retrieval_query 是实际用于检索的 query（单轮时等于原 query，追问时是消解后的）,
     # 便于前端与排查时看清"检索到底拿什么去搜了"。
     # grounded=False 表示检索未达阈值：answer 是不依赖知识库的兜底回答，contexts 已清空。
-    return {"answer": answer, "sources": unique_sources, "contexts": contexts,
+    return {"answer": answer, "sources": sources, "contexts": contexts,
             "grounded": grounded, "query": query, "retrieval_query": retrieval_query}
 
 
@@ -333,18 +327,8 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
               f"转为无知识库支撑回答", file=sys.stderr, flush=True)
         contexts = []
 
-    # 去重引用来源（与 rag_query 一致）
-    seen = set()
-    unique_sources = []
-    for c in contexts:
-        key = c["source"]
-        if key not in seen:
-            seen.add(key)
-            unique_sources.append({
-                "source": c["source"],
-                "page": c.get("page", 0),
-                "type": c.get("type", "text"),
-            })
+    # 整理引用来源（与 rag_query 同一套逻辑，已收口到 src/citations.py）
+    sources = citations.unique_sources(contexts)
 
     def gen():
         full_answer = ""
@@ -355,32 +339,9 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
         # 无历史才缓存：带历史的追问是个性化的，命中率低且易错配
         if not history and full_answer:
             try:
-                cache_answer(kb_id, query, full_answer, unique_sources)
+                cache_answer(kb_id, query, full_answer, sources)
             except Exception:
                 pass  # 缓存失败不影响回答
 
-    return gen(), unique_sources, contexts, retrieval_query
+    return gen(), sources, contexts, retrieval_query
 
-
-def extract_cited_sources(answer: str, contexts: list[dict]) -> list[dict]:
-    """解析回答中的 [n] 引用序号，映射到真实检索来源（按出现顺序去重）。
-
-    防 LLM 编造：文件名/页码不再由模型生成，只让模型给序号，
-    由本函数映射回检索到的真实 sources。越界/异常序号自动忽略。
-    """
-    if not contexts:
-        return []
-    seen, out = set(), []
-    for n in re.findall(r"\[(\d+)\]", answer or ""):
-        i = int(n) - 1
-        if 0 <= i < len(contexts):
-            c = contexts[i]
-            key = c.get("source")
-            if key and key not in seen:
-                seen.add(key)
-                out.append({
-                    "source": c["source"],
-                    "page": c.get("page", 0),
-                    "type": c.get("type", "text"),
-                })
-    return out
