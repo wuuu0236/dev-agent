@@ -163,7 +163,7 @@ class HybridRetriever:
         from src.reranker import rerank as _rerank
         return _rerank(query, sorted_results, top_k, enabled=rerank)
 # ================================================================
-# 模块级函数：供 v4 Agent 和 MCP 调用（统一入口）
+# 模块级函数：供 Agent 和 MCP 调用（统一入口）
 # ================================================================
 
 _DEFAULT_KB = "agent"

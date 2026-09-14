@@ -14,7 +14,7 @@
 
 | 维度 | 现状 |
 |------|------|
-| 架构 | LangGraph StateGraph + 双入口分工（RAG 快路径 / Agent 慢路径），四版演进可追溯 |
+| 架构 | LangGraph StateGraph + 双入口分工（RAG 快路径 / Agent 慢路径） |
 | 检索 | BM25(jieba) + 向量 + RRF，A/B 测试后可配置切换；BM25 索引带失效缓存 |
 | 评估 | RAGAS 四指标 + 多配置对比 + 历史存档（业界标准口径，不是自造轮子） |
 | 可观测 | Langfuse @observe + callback，token/延迟进面板 |

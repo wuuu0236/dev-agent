@@ -1,15 +1,12 @@
 """
 Agent API 服务 —— 把 dev_agent 变成 HTTP 接口
 
-v2 改动：/chat 接口从 while 循环换成 LangGraph 图
-  · 以前：server.py 自己写 while 循环调 AI
-  · 现在：server.py 只管接收请求 → 调 graph → 返回结果
-  · Agent 的核心逻辑全在 dev_agent_langgraph.py 的图里
-
-v3 改动：多轮历史 + 真流式
-  · ChatRequest 支持 history 字段，多轮追问有上下文（与 RAG 问答路径对齐）
-  · /chat/stream 改真流式：stream_agent 用 graph.stream(stream_mode="messages")
-    按 token 吐最终答案，不再是「跑完再切块」的假流式
+实现要点：
+  · server.py 只负责接收请求 → 调 graph → 返回结果
+    Agent 的核心逻辑全在 dev_agent_langgraph.py 的图里
+  · 多轮：ChatRequest 支持 history 字段，多轮追问有上下文（与 RAG 问答路径对齐）
+  · 流式：/chat/stream 是真流式，stream_agent 用 graph.stream(stream_mode="messages")
+    按 token 吐最终答案，不是「跑完再切块」
 
 跑起来后：
   浏览器访问 http://localhost:8000/docs → 自动生成的 API 文档

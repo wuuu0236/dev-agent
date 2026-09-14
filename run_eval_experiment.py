@@ -83,8 +83,6 @@ TESTSET = [
      "reference": "LLM=DeepSeek API；Agent 框架=LangGraph(StateGraph)；Web=FastAPI+Uvicorn；向量检索=Sentence-Transformers+NumPy；MCP=FastMCP；容器化=Docker+Compose。"},
     {"question": "怎么用 Docker 一键部署 Dev Agent？",
      "reference": "运行 docker compose up，启动后浏览器打开 http://localhost:8000/docs 访问 Swagger API 文档。"},
-    {"question": "dev-agent 经历了哪四个版本迭代？",
-     "reference": "v1 Agent 基础循环（ReAct）；v2 logging+异常保护；v3 流式输出；v4 LangGraph StateGraph。"},
 ]
 
 # ================================================================

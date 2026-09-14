@@ -23,7 +23,7 @@ ReAct 循环包含三个阶段：
 
 ## 如何在代码中实现 Agent 循环
 
-最简单的实现是用 `while` 循环：LLM 不断决策，直到不再需要调用工具。本项目 v1 版本就是这样实现的。
+最简单的实现是用 `while` 循环：LLM 不断决策，直到不再需要调用工具。
 
 更优雅的方式是用 LangGraph 的 StateGraph：把 Agent 流程定义成节点（node）和边（edge）组成的图。节点包括 call_model（调用 LLM）和 call_tools（调用工具），条件边根据 LLM 是否要求调用工具来决定下一步。
 

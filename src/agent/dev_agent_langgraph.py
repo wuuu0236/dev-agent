@@ -1,8 +1,8 @@
 """
 dev_agent_langgraph.py —— LangGraph 版 Agent
 
-和 v3 功能完全一样（ReAct：思考 → 调工具 → 思考 → 回答）
-区别：用 StateGraph（图）代替 while（循环）
+用 StateGraph（图）驱动 ReAct 循环：思考 → 调工具 → 思考 → 回答
+控制流由图（节点 + 条件边）表达，而不是 while 循环
 
 三个核心概念：
   1. State  — 在图中流动的数据（类比快递包裹）
@@ -181,7 +181,7 @@ TOOL_MAP = {
 
 
 # ── 格式转换说明 ────────────────────────────────────────
-# 旧版（v3）：call_model 用裸 OpenAI 客户端，需要手动把 LangChain 消息
+# 旧版：call_model 用裸 OpenAI 客户端，需要手动把 LangChain 消息
 #   翻译成 OpenAI API 格式（曾有一个 _langchain_to_openai 转换层）。
 # 现在：直接用 LangChain 的 ChatOpenAI 模型，它原生接受 LangChain 消息，
 #   tool_calls 也直接返回 LangChain 格式——转换层删掉，少一层出错面。
@@ -413,7 +413,6 @@ if __name__ == "__main__":
     print("=" * 50)
     print("[LangGraph] 开发助手 Agent")
     print("=" * 50)
-    print("和 v3 功能一样，但用 StateGraph 代替 while 循环")
     print("当前工具: list_files | read_file | search_in_files | search_knowledge")
     print("输入 'exit' 退出")
     print("=" * 50)

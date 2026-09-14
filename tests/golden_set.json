@@ -2,11 +2,11 @@
   "meta": {
     "kb_id": "83cd2d0c",
     "kb_name": "RAG 评测语料库",
-    "version": "1.1",
+    "version": "1.2",
     "created": "2026-09-11",
     "doc_count": 14,
     "chunk_count": 108,
-    "note": "RAG 检索质量回归测试集。expected_sources 必须与 Chroma 的 source 字段一致（parser 用 Path(file).name，即文件名）。v1.1：原库只有 6 文档/18 chunk，top_k=5 捞了全库 28%，Recall@5 恒为 1.0 无法区分优化效果；改用 scripts/build_eval_kb.py 建的 108 chunk 语料库，难度足够。重建语料后需同步更新此 kb_id。",
+    "note": "RAG 检索质量回归测试集。expected_sources 必须与 Chroma 的 source 字段一致（parser 用 Path(file).name，即文件名）。v1.1：原库只有 6 文档/18 chunk，top_k=5 捞了全库 28%，Recall@5 恒为 1.0 无法区分优化效果；改用 scripts/build_eval_kb.py 建的 108 chunk 语料库，难度足够。重建语料后需同步更新此 kb_id。v1.2：删除 q23（原「dev-agent 经历了哪四个版本的迭代？」）——项目已移除 v1–v3 版本迭代叙事，该题不再有可检索的答案来源；题数 27→26，case id 不重排以保持与历史存档对齐，故 q23 号位空缺。",
     "usage": "python scripts/eval_retrieval.py --kb f99c2c78"
   },
   "cases": [
@@ -160,13 +160,6 @@
     {
       "id": "q22",
       "question": "Dockerfile 和 docker-compose.yml 的分工有什么区别？",
-      "expected_sources": ["05-dev-agent-deployment.md"],
-      "difficulty": "medium",
-      "type": "single-hop"
-    },
-    {
-      "id": "q23",
-      "question": "dev-agent 经历了哪四个版本的迭代？",
       "expected_sources": ["05-dev-agent-deployment.md"],
       "difficulty": "medium",
       "type": "single-hop"

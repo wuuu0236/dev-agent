@@ -99,7 +99,7 @@
 
 | 项 | 内容 |
 |---|---|
-| **现状** | 已有：`tests/golden_set.json`（27 条：25 正样本含 2 条多跳 + 2 条负样本）、`scripts/eval_retrieval.py`（Recall@K / Hit@K / Hit@1 / MRR / 负样本最高分，支持历史对比与 JSON 存档）、语义缓存 `query_cache`（带 `vec_ver` 版本失效）、Langfuse 观测。 |
+| **现状** | 已有：`tests/golden_set.json`（26 条：24 正样本含 2 条多跳 + 2 条负样本）、`scripts/eval_retrieval.py`（Recall@K / Hit@K / Hit@1 / MRR / 负样本最高分，支持历史对比与 JSON 存档）、语义缓存 `query_cache`（带 `vec_ver` 版本失效）、Langfuse 观测。 |
 | **该理解什么** | **评测体系是 RAG 的地基，不是附属品。** 没有可信的评测，所有优化都是盲改。 |
 | **已踩的坑（最值钱的一课）** | 最初 A/B 两组数字**完全一样**——不是改动无效，是原库只有 18 个 chunk，`top_k=5` 捞了全库 28%，**Recall@5 恒等于 1.0，尺子失灵了**。建了 108 chunk 的语料才恢复区分度。**任何优化开始前，先验证你的尺子能测出差异。** |
 | **待补的能力** | ① 生成侧评测（RAGAS 四指标，项目里已有 `src/evaluation_ragas.py`，但没跟检索评测串成一条流水线）；② 数据更新/增量索引（现在改文档要重建整库）；③ 成本与延迟监控（token 消耗、P95 延迟）。 |

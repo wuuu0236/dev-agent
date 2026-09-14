@@ -8,15 +8,12 @@
 
 基于 **FastAPI + Streamlit + LangGraph** 的个人知识库问答系统：本地文档解析与索引（向量 + BM25 + RRF 融合）、交叉编码精排、RAGAS 量化评估，另带文件操作 Agent 与 MCP 工具接口。已上线可演示。
 
-> 架构经历四轮迭代（while 循环 → 异常保护 → 流式输出 → LangGraph StateGraph），提交记录见 git 历史（`git log`）。**v1–v3 的代码文件已从仓库移除**，仓库中只保留 v4 一套实现；当前 Web 问答路径与 HTTP API 路径分别对应下面「两条入口」一节的两种实现。
-
 🌐 **在线演示**：https://dev-agent-dovd6phmnbyxrw6qzzzyzf.streamlit.app/
 
 ---
 
 ## ✨ 核心亮点
 
-- **架构演进可追溯**：v1 while ReAct → v2 logging/异常保护 → v3 流式输出 → v4 LangGraph StateGraph。四轮迭代的提交记录见 git 历史；**v1–v3 的代码文件已从仓库移除**，仓库目前只保留 v4 一套实现（`src/agent/dev_agent_langgraph.py`），它服务于 HTTP API 路径。
 - **混合检索引擎**：自实现 BM25 + 稠密向量 + RRF 融合；BM25 接入 jieba 分词修复中文按字切分召回过窄。当前 `BM25_WEIGHT=0`（经 A/B 测试，当前文档场景下纯向量优于混合），BM25 代码保留、改权重即可启用。
 - **交叉编码精排（Rerank）**：粗排从候选池捞 50 条，再由 `bge-reranker-v2-m3` 逐条精排取 top 5。A/B 实测（同库同测试集，只切这一个开关）：Recall@5 0.960→1.000、Hit@1 0.840→0.920、MRR 0.887→0.960。任一批次失败即整体降级为粗排顺序，不影响问答可用性。
 - **数据清洗管线**：归一化 → 跨页页眉页脚去除（按页首尾行跨页统计）→ PDF 硬换行断句合并 → 垃圾块过滤。收口在 `parser.parse_file()`，Web 上传 / Agent 工具 / 脚本灌库三条入库路径全覆盖，可一键开关做 A/B。
@@ -54,16 +51,6 @@ flowchart LR
     C --> B
     B -->|回答完毕| D[End]
 ```
-
-四次迭代速览（v1–v3 代码已移除，仅存于 git 历史）：
-
-| 版本 | 改进 | 解决的问题 |
-|:---:|------|------|
-| v1 | Agent 基础循环 | ReAct：思考 → 调工具 → 回答 |
-| v2 | logging + 异常保护 | 工具崩溃不连累 Agent |
-| v3 | 流式输出 | 打字机效果，不干等 |
-| v4 | LangGraph StateGraph | 流程可视化，加功能加节点即可 |
-| Web | Streamlit + SQLite + 评估面板 | 从本地 Demo 到线上产品 |
 
 ---
 

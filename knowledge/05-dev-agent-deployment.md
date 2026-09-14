@@ -52,19 +52,6 @@ curl -X POST http://localhost:8000/chat \
 
 API 支持流式输出（Server-Sent Events），前端可以实时看到 Agent 的思考过程。
 
-## 项目版本演进
-
-dev-agent 经历了四个版本的迭代：
-
-| 版本 | 核心改进 | 解决的问题 |
-|------|---------|-----------|
-| v1 | Agent 基础循环 | 实现 ReAct 模式：思考 → 调工具 → 回答 |
-| v2 | logging + 异常保护 | 单个工具崩溃不影响整个 Agent |
-| v3 | 流式输出 | 打字机效果，用户体验更好 |
-| v4 | LangGraph StateGraph | 流程可视图化，架构更清晰 |
-
-这个演进过程展示了从一个简单的 while 循环到完整的图状态机的架构升级路径，每一步都解决了实际开发中遇到的具体问题。
-
 ## Dockerfile 和 docker-compose 的作用
 
 Dockerfile 定义了如何构建项目镜像：基于 Python 3.11，安装依赖，复制源码，指定启动命令。docker-compose.yml 定义了如何运行服务：端口映射、环境变量、卷挂载（把宿主机目录映射到容器内）。两者的关系是：Dockerfile 负责"构建什么"，docker-compose.yml 负责"怎么运行"。
