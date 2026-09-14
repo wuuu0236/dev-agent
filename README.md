@@ -317,7 +317,8 @@ dev-agent/
 │   └── eval_retrieval.py         # 检索评测（Recall@K / Hit@K / Hit@1 / MRR）
 ├── tests/                        # 17 个测试文件（表格解析 / 清洗 / 分块 / 混合检索融合 / 精排 / 追问改写 / 质量门控 / 引用 / 重建索引 / 嵌入 / 删除一致性 / 安全 …）
 ├── knowledge/                    # 知识库样例文档
-├── notes/                        # 设计与审查笔记（RAG 六环节、MaxKB 对标、工程审查）
+├── docs/                         # 正式文档（产品设计方案、面试速记）
+├── notes/                        # 设计与审查笔记（RAG 六环节、MaxKB 对标、工程审查、反馈环方案）
 ├── ingest_missing.py             # 一次性补数据脚本
 ├── run_eval_experiment.py        # 评估实验脚本
 ├── Dockerfile + docker-compose.yml
