@@ -613,12 +613,27 @@ function EvalPage({ evalData }) {
 /* ============================================================
  * 问答日志
  * ============================================================ */
-function LogPage({ logData }) {
+function LogPage({ logData, kbId, apiReady }) {
   const [filter, setFilter] = useState("all");
+  const [mode, setMode] = useState("all");           // 最近问答的筛选：all / ungrounded / rated
+  const [recent, setRecent] = useState(null);
   const data = logData || MOCK_LOG;
   const s = data.stats || {};
   const near = s.near_miss || [], none = s.no_neighbor || [];
   const shown = filter === "near" ? near : filter === "none" ? none : [...near, ...none];
+
+  // 筛选在下层 SQL 完成（only_ungrounded / only_rated），不拉全表再到前端过滤
+  useEffect(() => {
+    if (apiReady !== true) { setRecent(null); return; }
+    let alive = true;
+    const qs = `kb_id=${kbId}&limit=50`
+      + (mode === "ungrounded" ? "&only_ungrounded=true" : "")
+      + (mode === "rated" ? "&only_rated=true" : "");
+    apiGet(`/api/answer_log?${qs}`)
+      .then((d) => { if (alive) setRecent(d.recent || []); })
+      .catch(() => { if (alive) setRecent([]); });
+    return () => { alive = false; };
+  }, [kbId, mode, apiReady]);
 
   return (
     <div>
@@ -648,6 +663,37 @@ function LogPage({ logData }) {
         ))}
         {shown.length === 0 && <div className="empty-tip">暂无记录（多问几个库外问题就会积累）</div>}
       </div>
+
+      <div className="section-title" style={{ marginTop: 22 }}>最近问答</div>
+      <div className="filter-row">
+        {[["all", "全部"], ["ungrounded", "只看未命中"], ["rated", "只看已反馈"]].map(([k, t]) => (
+          <span key={k} className={"filter-chip " + (mode === k ? "on" : "")} onClick={() => setMode(k)}>{t}</span>
+        ))}
+      </div>
+      <div className="card">
+        {(recent || []).map((l) => (
+          <div className="log-item" key={l.id}>
+            <div className={"log-score " + (l.grounded ? "ok" : "near")}>
+              {l.gate_score != null ? Number(l.gate_score).toFixed(2) : "—"}<small>最高精排分</small>
+            </div>
+            <div className="log-body">
+              <div className="log-q">{l.question}</div>
+              <div className="log-meta">
+                {l.created_at || ""} · {l.grounded ? "有知识库支撑" : "未通过门控"}
+                {l.hit_cache ? " · 缓存命中" : ""}
+              </div>
+              {l.rating && (
+                <span className={"log-action " + (l.rating === "up" ? "tune" : "adddoc")}>
+                  {l.rating === "up" ? "👍 用户觉得有用" : "👎 用户觉得没用"}
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+        {recent && recent.length === 0 && <div className="empty-tip">没有符合条件的记录</div>}
+        {recent === null && <div className="empty-tip">后端未连接，无法加载最近问答</div>}
+      </div>
+
       <div className="muted" style={{ marginTop: 12, lineHeight: 1.7 }}>
         💡 「检索没命中」和「库里根本没有」在系统内部长得一样（都是 200、都写了缓存）。按最高分把未命中问题分成两类待办，避免去调一个根本没调错的参数。
       </div>
@@ -767,7 +813,7 @@ function App() {
           {page === "upload" && <UploadPage apiReady={apiReady} kbId={kbId} kbs={kbs}
             refresh={() => loadKbData(kbId)} notify={notify} />}
           {page === "eval" && <EvalPage evalData={evalData} />}
-          {page === "log" && <LogPage logData={logData} />}
+          {page === "log" && <LogPage logData={logData} kbId={kbId} apiReady={apiReady} />}
         </div>
       </div>
     </div>

@@ -86,7 +86,7 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 | `/api/kbs/{kb_id}/upload` | POST | 上传入库（multipart） | `parser.parse_file` → `chunker.chunk_parsed` → `vector_store.add_chunks` |
 | `/api/kbs/{kb_id}/reindex` | POST | 按当前参数重建索引 | `reindex.rebuild_kb` |
 | `/api/docs/{doc_id}` | DELETE | 删文档（SQLite + Chroma 双清） | `database.delete_document` + `vector_store.delete_chunks_by_source` |
-| `/api/answer_log` | GET | 问答日志 + 缺口分类 | `answer_log.gap_stats` / `list_answers` |
+| `/api/answer_log` | GET | 问答日志 + 缺口分类；支持 `only_ungrounded` / `only_rated` 筛选 | `answer_log.gap_stats` / `list_answers` / `count_answers` |
 | `/api/eval/history` | GET | RAGAS 评估存档列表 | `evaluation_ragas.list_history` |
 | `/api/eval/history/{file}` | GET | 某份存档完整结果 | `evaluation_ragas.load_history` |
 
@@ -129,6 +129,11 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 - **前端先改本地状态再发请求**（乐观更新），请求失败才回滚，点按钮不会有延迟感；
 - `rating` 非法值返回 400（`set_rating` 只允许 `None / 'up' / 'down'`），`log_id` 不存在返回 404；
 - 与「问答日志」页面的关系是：那里统计的是**隐式信号**（没答上来 = 库里缺东西），这里是**显式信号**（答上来了但用户觉得没用）——两者互补，都是后续调检索 / 补文档的入口。
+
+「问答日志」页下半部分的「最近问答」因此提供两个筛选，且**筛选在 SQL 层完成**（`list_answers` 的 `only_ungrounded` / `only_rated`），不是拉全表再在前端过滤：
+
+- `only_ungrounded=true` —— 隐式信号：门控没过，库里撑不住这个问法；
+- `only_rated=true` —— 显式信号：用户点过 👍/👎 的记录，含「答上了但没用」。
 
 部署相关：FastAPI 加了 CORS（`allow_origins=["*"]`，本机服务 + 允许 `file://` 直开调试），并把 `frontend/` 目录挂在 `/app` 静态托管，因此前端用相对路径即可，不需要配置 API 地址。上传接口依赖 `python-multipart`（已加入 `requirements.txt`），缺了会在定义路由时直接抛 `RuntimeError`。
 

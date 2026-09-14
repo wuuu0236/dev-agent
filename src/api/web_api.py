@@ -291,13 +291,21 @@ def delete_doc(doc_id: str):
 
 
 @router.get("/answer_log", summary="问答日志 + 缺口清单")
-def answer_log_api(kb_id: str | None = None, limit: int = 50):
-    from src.answer_log import gap_stats, list_answers
+def answer_log_api(kb_id: str | None = None, limit: int = 50,
+                   only_ungrounded: bool = False, only_rated: bool = False):
+    """问答日志，可按两类信号筛选（筛选在下层 SQL 完成，不拉全表再过滤）。
+
+    · `only_ungrounded` —— 隐式信号：门控没过（库里撑不住这个问法）
+    · `only_rated`      —— 显式信号：用户点过 👍/👎 的记录（含"答上了但没用"）
+    """
+    from src.answer_log import count_answers, gap_stats, list_answers
 
     return {
         "kb_id": kb_id,
         "stats": gap_stats(kb_id),
-        "recent": list_answers(kb_id, limit=limit),
+        "recent": list_answers(kb_id, limit=limit,
+                               only_ungrounded=only_ungrounded, only_rated=only_rated),
+        "total": count_answers(kb_id),
     }
 
 
