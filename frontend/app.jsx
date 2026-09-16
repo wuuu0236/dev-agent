@@ -4,24 +4,59 @@ import { createRoot } from "react-dom/client";
 /* ============================================================
  * 数据层：优先调后端 /api（同源部署），后端不可达时回退演示数据
  * 这样单独双击 index.html 也能演示，起服务后自动切真数据
+ *
+ * 鉴权：除 /health 与 /auth/* 外全部端点要求 Bearer token。
+ *   · file:// 协议（双击演示）调不了 API，本就回退 mock，不要求登录；
+ *   · http(s) 下未登录先出登录页；任何接口返回 401（token 过期/账号被删）
+ *     统一清凭据并回到登录页。
  * ============================================================ */
 
+const TOKEN_KEY = "dl_token";
+const USER_KEY = "dl_user";
+
+const readAuth = () => {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const raw = localStorage.getItem(USER_KEY);
+  if (!token || !raw) return null;
+  try { return { token, user: JSON.parse(raw) }; } catch { return null; }
+};
+const saveAuth = (a) => {
+  localStorage.setItem(TOKEN_KEY, a.token);
+  localStorage.setItem(USER_KEY, JSON.stringify(a.user));
+};
+const clearAuth = () => { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY); };
+const authHeaders = () => {
+  const a = readAuth();
+  return a ? { Authorization: "Bearer " + a.token } : {};
+};
+
+// token 失效的统一出口：清凭据 + 通知 App 回登录页（App 里监听该事件）
+const AUTH_LOST_EVENT = "dl-auth-lost";
+
+const _guard = (status, path) => {
+  if (status === 401 && location.protocol !== "file:") {
+    clearAuth();
+    window.dispatchEvent(new Event(AUTH_LOST_EVENT));
+  }
+  return new Error(`${status} ${path}`);
+};
+
 const apiGet = async (path) => {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  const r = await fetch(path, { headers: authHeaders() });
+  if (!r.ok) throw _guard(r.status, path);
   return r.json();
 };
 const apiPost = async (path, body) => {
   const r = await fetch(path, {
-    method: "POST", headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${r.status} ${path}: ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) throw _guard(r.status, path);
   return r.json();
 };
 const apiDelete = async (path) => {
-  const r = await fetch(path, { method: "DELETE" });
-  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  const r = await fetch(path, { method: "DELETE", headers: authHeaders() });
+  if (!r.ok) throw _guard(r.status, path);
   return r.json();
 };
 
@@ -730,7 +765,73 @@ const NAV = [
   { key: "log", ico: "🩺", label: "问答日志" },
 ];
 
+/* ============================================================
+ * 登录 / 注册
+ * ============================================================ */
+function LoginPage({ onLogin }) {
+  const [mode, setMode] = useState("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr("");
+    if (username.trim().length < 2 || password.length < 6) {
+      setErr("用户名至少 2 个字符，密码至少 6 位");
+      return;
+    }
+    try {
+      if (mode === "register") {
+        const r = await fetch("/api/auth/register", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: username.trim(), password }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          setErr(d.detail || "注册失败（用户名可能已被占用）");
+          return;
+        }
+      }
+      const r = await fetch("/api/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      if (!r.ok) { setErr("用户名或密码错误"); return; }
+      const data = await r.json();
+      saveAuth(data);
+      onLogin(data);
+    } catch {
+      setErr("后端不可达，请先启动服务（start-web.bat）");
+    }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg, #f6f7fb)" }}>
+      <form onSubmit={submit} style={{ width: 340, padding: 32, borderRadius: 16, background: "#fff", boxShadow: "0 8px 30px rgba(0,0,0,.08)" }}>
+        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>🧠 DataLens</div>
+        <div style={{ fontSize: 13, color: "#888", marginBottom: 20 }}>{mode === "login" ? "登录以继续" : "创建新账号"}</div>
+        <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="用户名"
+          style={{ width: "100%", boxSizing: "border-box", padding: "10px 12px", marginBottom: 10, borderRadius: 8, border: "1px solid #ddd", fontSize: 14 }} />
+        <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码" type="password"
+          style={{ width: "100%", boxSizing: "border-box", padding: "10px 12px", marginBottom: 10, borderRadius: 8, border: "1px solid #ddd", fontSize: 14 }} />
+        {err && <div style={{ color: "#c0392b", fontSize: 13, marginBottom: 10 }}>{err}</div>}
+        <button type="submit" style={{ width: "100%", padding: "10px 0", borderRadius: 8, border: "none", background: "#4f6ef7", color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
+          {mode === "login" ? "登录" : "注册并登录"}
+        </button>
+        <div style={{ textAlign: "center", marginTop: 14, fontSize: 13 }}>
+          <a href="#" onClick={(e) => { e.preventDefault(); setErr(""); setMode(mode === "login" ? "register" : "login"); }} style={{ color: "#4f6ef7" }}>
+            {mode === "login" ? "没有账号？去注册" : "已有账号？去登录"}
+          </a>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function App() {
+  const isDemoProtocol = location.protocol === "file:";  // 双击 index.html：调不了 API，纯演示模式，不要求登录
+  const [auth, setAuth] = useState(isDemoProtocol ? null : readAuth());
   const [page, setPage] = useState("chat");
   const [apiReady, setApiReady] = useState(null);
   const [kbs, setKbs] = useState(MOCK_KBS);
@@ -763,7 +864,9 @@ function App() {
     } catch { setEvalData(null); }
   };
 
+  // 探活 + 拉初始数据：登录后才做（端点全部要 token）。退出登录时清态并回到登录页。
   useEffect(() => {
+    if (!auth) { setApiReady(null); return; }
     (async () => {
       try {
         await apiGet("/api/health");
@@ -772,9 +875,17 @@ function App() {
         if (ks.length) { setKbs(ks); setKbId(ks[0].id); }
       } catch { setApiReady(false); }
     })();
+  }, [auth]);
+
+  useEffect(() => {
+    const onLost = () => setAuth(null);
+    window.addEventListener(AUTH_LOST_EVENT, onLost);
+    return () => window.removeEventListener(AUTH_LOST_EVENT, onLost);
   }, []);
 
   useEffect(() => { if (apiReady === true && kbId) { loadKbData(kbId); loadEval(); } }, [apiReady, kbId]);
+
+  if (!isDemoProtocol && !auth) return <LoginPage onLogin={setAuth} />;
 
   const pageMeta = {
     chat: ["智能问答", "混合检索 · 精排 · 门控 · 引用可核实"],
@@ -792,7 +903,7 @@ function App() {
           <div className="logo-icon">🧠</div>
           <div>
             <div className="logo-name">DataLens</div>
-            <div className="logo-sub">个人知识库 RAG 问答</div>
+            <div className="logo-sub">私有知识库 RAG 问答</div>
           </div>
         </div>
         {NAV.map((n) => (
@@ -806,6 +917,12 @@ function App() {
             <span className="badge">🔒 私有化</span>
             <span className="badge v">MCP</span>
           </div>
+          {auth && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, fontSize: 12, color: "#888" }}>
+              <span>👤 {auth.user.username}{auth.user.role === "admin" ? "（管理员）" : ""}</span>
+              <a href="#" onClick={(e) => { e.preventDefault(); clearAuth(); setAuth(null); }} style={{ color: "#4f6ef7" }}>退出</a>
+            </div>
+          )}
         </div>
       </div>
 

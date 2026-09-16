@@ -33,9 +33,21 @@ def _init_db_once():
 
 _init_db_once()
 
+# --- 登录门 ---
+# 必须放在 _init_db_once() **之后**：建表与默认管理员迁移要先完成，
+# 否则首次访问时 users 表还不存在，登录必定失败（鸡生蛋）。
+from src.auth.deps import require_login_ui
+
+_current_user = require_login_ui()
+
 # --- 侧边栏 ---
 st.sidebar.title("📚 DataLens")
 st.sidebar.markdown("**智能知识库问答平台**")
+st.sidebar.caption(f"👤 {_current_user['username']}（{_current_user['role']}）")
+if st.sidebar.button("退出登录", key="logout_btn"):
+    st.session_state.pop("user", None)
+    st.session_state.pop("token", None)
+    st.rerun()
 st.sidebar.divider()
 st.sidebar.markdown("""
 ### 功能导航

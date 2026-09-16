@@ -1,9 +1,14 @@
 """
 SQLite 数据库：知识库和文档的元数据管理
 
-两张表：
-  knowledge_bases — 知识库（id, name, description, created_at）
+四张表：
+  knowledge_bases — 知识库（id, name, description, owner_id, created_at）
   documents       — 文档（id, kb_id, filename, file_size, chunk_count, status, created_at）
+  users           — 用户（id, username, password_hash, role, created_at）
+  kb_permissions  — 知识库授权（kb_id, user_id, role），角色层级 owner > editor > viewer
+
+users / kb_permissions 来自 docs/technical-optimization-plan.md 第一章。权限层刻意
+保持最小：只有「归属 + 三种角色」，没有邀请链接、组织架构、SSO。
 
 为什么用 SQLite：
   - 零配置，不需要安装数据库服务
@@ -11,6 +16,7 @@ SQLite 数据库：知识库和文档的元数据管理
   - 适合单机小规模应用（< 10万条）
   - 面试官一看就懂，不用解释 PostgreSQL/MySQL
 """
+import os
 import sqlite3
 import uuid
 from datetime import datetime
@@ -33,6 +39,8 @@ def get_connection() -> sqlite3.Connection:
 def init_db():
     """初始化数据库表。首次运行时自动创建。
     在 app.py 启动时调用一次即可。
+
+    幂等：建表全用 CREATE TABLE IF NOT EXISTS；列级变更走 _migrate_add_column。
     """
     conn = get_connection()
     conn.execute("""
@@ -55,24 +63,104 @@ def init_db():
             FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id            TEXT PRIMARY KEY,
+            username      TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role          TEXT NOT NULL DEFAULT 'user',
+            created_at    TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS kb_permissions (
+            kb_id   TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role    TEXT NOT NULL DEFAULT 'viewer',
+            PRIMARY KEY (kb_id, user_id),
+            FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    _migrate_add_column(conn, "knowledge_bases", "owner_id", "TEXT")
     conn.commit()
+
+    # users 为空 = 从单用户版本首次升级上来：建默认管理员并认领所有无主知识库。
+    # 不认领的话，这些库的 owner_id 一直是 NULL，连管理员都"没有权限"看——
+    # 老数据会集体变成孤儿。
+    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        _create_default_admin(conn)
+        conn.commit()
     conn.close()
+
+
+def _migrate_add_column(conn, table: str, column: str, decl: str):
+    """幂等地给已有表加一列。
+
+    SQLite 没有 `ADD COLUMN IF NOT EXISTS`，重复执行会抛 duplicate column name。
+    这里先查 PRAGMA 再决定要不要 ALTER，而不是「catch 掉所有异常」——后者会把
+    「表压根不存在」这类真错误一起吞掉，留下一半迁移成功的库。
+    """
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _create_default_admin(conn):
+    """建默认管理员，并把所有无主知识库划归给它。
+
+    用户名 / 密码读 ADMIN_USERNAME / ADMIN_PASSWORD（默认 admin / changeme）。
+    ⚠️ 默认密码是明文写死的弱口令，用途只有一个：本地首次升级时把老数据认领回来。
+    部署到可能被外网访问的环境前必须改掉——它是整套权限体系里唯一的默认凭据。
+    """
+    from src.auth.service import hash_password  # 惰性：避开 database ←→ auth 循环 import
+
+    username = os.getenv("ADMIN_USERNAME", "admin")
+    password = os.getenv("ADMIN_PASSWORD", "changeme")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    conn.execute(
+        "INSERT OR IGNORE INTO users (id, username, password_hash, role, created_at) "
+        "VALUES (?, ?, ?, 'admin', ?)",
+        ("admin", username, hash_password(password), now),
+    )
+    row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return  # 用户名被别的角色占了（UNIQUE 冲突）——不认领，避免把库挂到错误账号上
+    admin_id = row["id"]
+    conn.execute("UPDATE knowledge_bases SET owner_id = ? WHERE owner_id IS NULL", (admin_id,))
+    for kb in conn.execute("SELECT id FROM knowledge_bases").fetchall():
+        conn.execute(
+            "INSERT OR REPLACE INTO kb_permissions (kb_id, user_id, role) VALUES (?, ?, 'owner')",
+            (kb["id"], admin_id),
+        )
 
 
 # --- 知识库操作 ---
 
-def create_kb(name: str, description: str = "") -> dict:
-    """创建新知识库，返回它的数据"""
+def create_kb(name: str, description: str = "", owner_id: str | None = None) -> dict:
+    """创建新知识库，返回它的数据。
+
+    owner_id = 创建者。**有登录用户时必须传**：`list_accessible_kbs` 的过滤条件是
+    「owner_id 是我 或 kb_permissions 里有我」，不写 owner_id 就等于建了一个连
+    创建者自己都看不见的库（只有 admin 例外）。默认 None 是给脚本与 Agent 路径
+    （MCP 的 _ensure_kb）用的——那两条路径没有登录用户的概念。
+    """
     conn = get_connection()
     kb_id = str(uuid.uuid4())[:8]  # 短 ID，方便显示
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     conn.execute(
-        "INSERT INTO knowledge_bases (id, name, description, created_at) VALUES (?, ?, ?, ?)",
-        (kb_id, name, description, now)
+        "INSERT INTO knowledge_bases (id, name, description, owner_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        (kb_id, name, description, owner_id, now)
     )
+    if owner_id:
+        conn.execute(
+            "INSERT OR REPLACE INTO kb_permissions (kb_id, user_id, role) VALUES (?, ?, 'owner')",
+            (kb_id, owner_id),
+        )
     conn.commit()
     conn.close()
-    return {"id": kb_id, "name": name, "description": description, "created_at": now}
+    return {"id": kb_id, "name": name, "description": description,
+            "owner_id": owner_id, "created_at": now}
 
 
 def list_kbs() -> list[dict]:
@@ -143,6 +231,19 @@ def update_document_status(doc_id: str, status: str, chunk_count: int = 0):
     )
     conn.commit()
     conn.close()
+
+
+def get_document(doc_id: str) -> dict | None:
+    """按 id 取单条文档记录（只读，不删）。
+
+    存在的理由：删除接口的入参只有 doc_id，而权限是按**知识库**判的——
+    必须先查这条记录属于哪个库，才能在做任何破坏性操作**之前**判定权限。
+    用 delete_document 的返回值反推不行：那时数据已经没了。
+    """
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def delete_document(doc_id: str) -> dict | None:

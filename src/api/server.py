@@ -69,7 +69,7 @@ app.add_middleware(
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 if _FRONTEND_DIR.is_dir():
     app.mount("/app", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
-    print(f"[Dev Agent API] React 前端已挂载: http://localhost:8000/app")
+    print("[Dev Agent API] React 前端已挂载: http://localhost:8000/app")
 
 
 # 请求/响应模型（FastAPI 自动校验 + 生成文档）

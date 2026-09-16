@@ -25,6 +25,7 @@
 - **多模态文档解析**：基于 RapidOCR 的本地 OCR，支持图片直读 + 扫描版 PDF 识别，数据不出域；命中图片块时可接本地视觉模型（Ollama minicpm-v 等）看图回答。
 - **私有化 / 离线部署**：推理后端一键切换为本地 **Ollama**（qwen2.5:7b 等），Embedding 亦可走本地模型，实现完全离线、数据不出本机的本地个人使用。
 - **多知识库隔离**：SQLite 管理元数据、Chroma 管理向量，多知识库并行管理、互不干扰，配评估面板可直接对上传文档跑评估。
+- **多用户与权限**：JWT 登录（bcrypt 密码哈希），每个知识库归属创建者，可按用户名分享为 viewer（读）/ editor（写）/ owner（授权）三种角色，全局 `admin` 放行；Streamlit 与 REST API 两条入口走同一套权限规则（`src/auth/`）；单用户老库首次启动自动迁移（默认管理员认领全部无主知识库）。
 - **语义缓存**：以问题向量为键、按余弦相似度模糊匹配，重复 / 换个说法的提问直接命中秒回（实测约 0.2s，首次生成约 6s）；知识库文档增删时缓存自动作废（`src/query_cache.py`）。
 - **引用可核实**：回答中的 `[n]` 序号由代码映射回真实检索块，文件名与页码不由模型生成；展开引用可查看该文档被命中的原文片段，可追溯、可核实（`src/citations.py`）。
 - **索引可重建**：上传时按知识库保留原始文件，分块 / 嵌入参数调整后可在管理页一键重建索引，让老文档应用新规则；重建逐文档替换，单个文件失败不连累其他，缺原文的如实报告（`src/reindex.py`）。
@@ -156,28 +157,41 @@ curl -N -X POST http://localhost:8000/chat/stream \
 
 ### RAG 端点（供 React 前端使用，同源挂在 `/api` 下）
 
+除 `/api/health` 与 `/api/auth/*` 外**全部需要登录**：先拿 token，请求带
+`Authorization: Bearer <token>`。权限按知识库判定：viewer 读 / editor 写 / owner 授权，
+`admin` 全局放行（权限矩阵见 `src/auth/permissions.py`）。
+
 ```bash
-# 知识库列表
-curl http://localhost:8000/api/kbs
+# 注册 + 登录换 token（首次启动若无账号，默认管理员 admin / changeme，
+# 可用环境变量 ADMIN_USERNAME / ADMIN_PASSWORD 覆盖——外网部署务必改掉）
+curl -X POST http://localhost:8000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "secret123"}'
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "secret123"}' | python -c "import sys,json;print(json.load(sys.stdin)[\"token\"])")
+
+# 知识库列表（只返回当前用户有权限的库）
+curl http://localhost:8000/api/kbs -H "Authorization: Bearer $TOKEN"
 
 # 问答（非流式）：返回答案 + 引用 + 门控信息 + log_id
 curl -X POST http://localhost:8000/api/ask \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"kb_id": "af14d071", "question": "RAG Agent 指南包含哪些内容？"}'
 
 # 问答（SSE 流式）：meta → delta… → done
 curl -N -X POST http://localhost:8000/api/ask/stream \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"kb_id": "af14d071", "question": "RAG Agent 指南包含哪些内容？"}'
 
 # 给某条回答打反馈（rating: up / down / null，null = 撤销）
 curl -X POST http://localhost:8000/api/feedback \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"log_id": 42, "rating": "up"}'
 
 # 问答日志：按信号筛选（只返回该库下符合条件的记录）
-curl "http://localhost:8000/api/answer_log?kb_id=af14d071&only_ungrounded=true"
-curl "http://localhost:8000/api/answer_log?kb_id=af14d071&only_rated=true"
+curl "http://localhost:8000/api/answer_log?kb_id=af14d071&only_ungrounded=true" -H "Authorization: Bearer $TOKEN"
+curl "http://localhost:8000/api/answer_log?kb_id=af14d071&only_rated=true" -H "Authorization: Bearer $TOKEN"
 ```
 
 其余端点（上传入库、重建索引、删除文档、评估存档）见 `http://localhost:8000/docs` 与 [`docs/react-frontend.md`](docs/react-frontend.md)。

@@ -214,6 +214,10 @@ def rendered_app():
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=120)
+    # app.py 顶部有登录门（多用户改造，见 docs/technical-optimization-plan.md）：
+    # 未登录渲染的是登录页，侧边栏文案根本不会执行。注入已登录用户再渲染。
+    # 只注入登录态，断言本身不变。
+    at.session_state["user"] = {"id": "admin", "username": "admin", "role": "admin"}
     at.run()
     return at
 

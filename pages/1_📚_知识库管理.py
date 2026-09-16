@@ -4,12 +4,18 @@
 import shutil
 
 import streamlit as st
-from src.database import create_kb, list_kbs, delete_kb, get_kb_stats
+from src.auth.deps import require_login_ui
+from src.auth.permissions import list_accessible_kbs
+from src.database import create_kb, delete_kb, get_kb_stats
 from src.vector_store import create_collection, delete_collection, collection_count
 from src.config import kb_upload_dir
 from src.reindex import rebuild_kb, rebuildable_docs
 
 st.set_page_config(page_title="知识库管理 - DataLens", page_icon="📚")
+
+# 登录门：未登录时渲染登录页并 st.stop()，本文件后续代码不会执行。
+# _user 提到页面顶部（而不是用到时才取）——下面的「创建」与「列表」两处都要它。
+_user = require_login_ui()
 
 st.title("📚 知识库管理")
 
@@ -28,7 +34,7 @@ with st.expander("➕ 创建新知识库", expanded=False):
 
     if st.button("创建", type="primary"):
         if name.strip():
-            kb = create_kb(name.strip(), desc.strip())
+            kb = create_kb(name.strip(), desc.strip(), owner_id=_user["id"])
             create_collection(kb["id"])
             st.success(f"✅ 知识库「{name}」创建成功！")
             st.rerun()
@@ -51,7 +57,7 @@ def _cached_collection_count(kb_id: str) -> int:
 
 # --- 知识库列表 ---
 st.subheader("📋 我的知识库")
-kbs = list_kbs()
+kbs = list_accessible_kbs(_user["id"])
 
 if not kbs:
     st.info("还没有知识库，点击上方「创建新知识库」开始。")

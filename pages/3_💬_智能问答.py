@@ -4,12 +4,17 @@
 import re
 
 import streamlit as st
-from src.database import list_kbs, get_kb_stats
+from src.auth.deps import require_login_ui
+from src.auth.permissions import list_accessible_kbs
+from src.database import get_kb_stats
 from src.rag_qa import stream_rag_query
 from src.citations import extract_cited_sources
 from src.config import TOP_K_RETRIEVE, RETRIEVAL_MIN_SCORE
 
 st.set_page_config(page_title="智能问答 - DataLens", page_icon="💬")
+
+# 登录门（同 pages/1）
+_user = require_login_ui()
 
 st.title("💬 智能问答")
 
@@ -50,8 +55,10 @@ def _render_sources(sources: list) -> None:
 # 这两次 SQLite 查询单独看很轻，但次数一多页面就"不跟手"。
 # 包一层 cache_data：5 秒内不重复查库（新传文档最多延迟 5 秒刷新，可接受）。
 @st.cache_data(ttl=5)
-def _cached_list_kbs():
-    return list_kbs()
+def _cached_list_kbs(user_id: str):
+    # ⚠️ 必须带 user_id 参数：st.cache_data 是**跨 session 共享**的缓存，
+    # 写成无参函数会让后登录的人直接命中前一个人的知识库列表。
+    return list_accessible_kbs(user_id)
 
 
 @st.cache_data(ttl=5)

@@ -215,3 +215,15 @@ VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "1"))
 MAX_FILE_SIZE_MB = 20  # 上传文件大小限制
 ALLOWED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".csv",
                       ".png", ".jpg", ".jpeg", ".bmp", ".webp"]  # 末尾为图片类型
+
+# --- 认证与权限（多用户，见 docs/technical-optimization-plan.md 第一章）---
+# ⚠️ 下面三个默认值都是**开发默认**，任何可能被外网访问的部署都必须覆盖：
+#   · JWT_SECRET 的默认值写在源码里 → 任何人都能自己签一个合法 token
+#   · ADMIN_PASSWORD 默认 changeme → 等于没有密码
+# 之所以仍留默认值：让 clone 下来第一次启动就能跑通（否则第一步就卡在登录页）。
+# 首次启动建管理员时读取 ADMIN_*，之后改这两个变量不会改已存在账号的密码。
+JWT_SECRET = os.getenv("JWT_SECRET", "datalens-dev-secret-do-not-use-in-prod")
+JWT_ALGORITHM = "HS256"  # 不做成 env：换算法要同时改签发与校验两侧，不适合单独配
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")

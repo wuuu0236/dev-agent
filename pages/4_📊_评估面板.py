@@ -18,8 +18,12 @@
 """
 import json
 import streamlit as st
-from src.database import list_kbs, get_kb_stats
+from src.auth.deps import require_login_ui
+from src.auth.permissions import list_accessible_kbs
+from src.database import get_kb_stats
 from src.vector_store import check_embedding_dim
+
+_user = require_login_ui()
 
 # 演示测试集（基于 LangChain 公开文档，题型覆盖定义/对比/推理/应用/刁钻/细节）
 DEMO_QUESTIONS = [
@@ -165,7 +169,7 @@ def _show_comparison(cmp: dict):
 
 # ---------- 选择知识库 ----------
 
-kbs = list_kbs()
+kbs = list_accessible_kbs(_user["id"])
 if not kbs:
     st.warning("请先在「知识库管理」中创建知识库并上传文档。")
     st.stop()

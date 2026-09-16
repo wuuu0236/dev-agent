@@ -2,7 +2,9 @@
 页面 2：文档上传
 """
 import streamlit as st
-from src.database import (list_kbs, add_document, update_document_status,
+from src.auth.deps import require_kb_access_ui, require_login_ui
+from src.auth.permissions import list_accessible_kbs
+from src.database import (add_document, update_document_status,
                           list_documents, delete_document)
 from src.parser import parse_file
 from src.chunker import chunk_parsed
@@ -10,6 +12,9 @@ from src.vector_store import add_chunks, collection_count, delete_chunks_by_sour
 from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, kb_upload_dir
 
 st.set_page_config(page_title="文档上传 - DataLens", page_icon="📄")
+
+# 登录门（同 pages/1）
+_user = require_login_ui()
 
 st.title("📄 文档上传")
 
@@ -19,13 +24,17 @@ if _msg := st.session_state.pop("doc_msg", None):
     st.success(_msg)
 
 # --- 选择知识库 ---
-kbs = list_kbs()
+kbs = list_accessible_kbs(_user["id"])
 if not kbs:
     st.warning("请先在「知识库管理」中创建知识库。")
     st.stop()
 
 kb_names = {kb["name"]: kb["id"] for kb in kbs}
 selected_name = st.selectbox("选择知识库", list(kb_names.keys()))
+
+# 上传/删除都要求 editor 权限。列表里会出现「被分享给你、但你只有 viewer 权限」的库，
+# 所以选中之后必须再判一次——只靠列表过滤等于没有权限。
+require_kb_access_ui(kb_names[selected_name], "editor")
 kb_id = kb_names[selected_name]
 
 # --- 已上传文档列表（放在上面，方便看到状态） ---

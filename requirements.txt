@@ -30,6 +30,12 @@ python-docx>=1.0.0
 rapidocr_onnxruntime>=1.2.0
 pillow>=10.0.0
 
+# --- 认证与权限（多用户，src/auth/）---
+# bcrypt：密码哈希（自带随机盐，哈希串里已含 salt，users 表不需要单独的 salt 列）
+bcrypt>=4.0
+# PyJWT：登录 token 的签发与校验
+PyJWT>=2.8
+
 # --- API 服务 ---
 fastapi>=0.100.0
 uvicorn>=0.20.0

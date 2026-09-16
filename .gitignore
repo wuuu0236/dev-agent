@@ -10,6 +10,9 @@ venv/
 *.egg-info/
 dist/
 
+# Node（frontend/ 构建依赖；package-lock.json 照常提交）
+node_modules/
+
 # 运行时数据
 data/
 *.pkl

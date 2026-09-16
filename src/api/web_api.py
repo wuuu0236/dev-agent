@@ -7,24 +7,34 @@ Web API —— 给 React 前端（frontend/）提供 REST 端点
   · 函数内部 import：任何模块在无 API key 环境下也必须能 import（CI 守卫），
     而本文件只被 API 服务加载，运行时 import 不影响那条守卫。
 
-端点一览：
-  GET    /api/health                  服务可用性与后端连通状态
-  GET    /api/kbs                     知识库列表（含文档数 / chunk 数）
-  GET    /api/kbs/{kb_id}/docs        某知识库的文档列表
-  POST   /api/ask                     RAG 问答（改写 → 检索 → 精排 → 门控 → 生成 → 引用）
-  POST   /api/ask/stream              同上，但答案用 SSE 逐块推送（前端打字机效果）
-  POST   /api/kbs/{kb_id}/upload      上传并入库（解析 → 切块 → 嵌入）
-  POST   /api/kbs/{kb_id}/reindex     按当前参数重建索引
-  DELETE /api/docs/{doc_id}           删除文档（SQLite + Chroma 双清）
-  GET    /api/answer_log              问答日志 + 缺口分类
-  GET    /api/eval/history            RAGAS 评估历史存档
+端点一览（除 /health 与 /auth/* 外**全部需要登录**，括号内是该端点要求的库权限）：
+  GET    /api/health                  服务可用性与后端连通状态（免登录）
+  POST   /api/auth/register           注册（免登录）
+  POST   /api/auth/login              登录，换取 JWT（免登录）
+  GET    /api/auth/me                 当前登录用户信息
+  POST   /api/kbs/{kb_id}/share       把知识库分享给他人（owner）
+  GET    /api/kbs                     知识库列表（只返回当前用户有权限的）
+  GET    /api/kbs/{kb_id}/docs        某知识库的文档列表（viewer）
+  POST   /api/ask                     RAG 问答（改写 → 检索 → 精排 → 门控 → 生成 → 引用）（viewer）
+  POST   /api/ask/stream              同上，但答案用 SSE 逐块推送（前端打字机效果）（viewer）
+  POST   /api/feedback                给某条回答打反馈（viewer）
+  POST   /api/kbs/{kb_id}/upload      上传并入库（解析 → 切块 → 嵌入）（editor）
+  POST   /api/kbs/{kb_id}/reindex     按当前参数重建索引（editor）
+  DELETE /api/docs/{doc_id}           删除文档（SQLite + Chroma 双清）（editor）
+  GET    /api/answer_log              问答日志 + 缺口分类（viewer）
+  GET    /api/eval/history            RAGAS 评估历史存档（登录即可）
+
+鉴权：`Authorization: Bearer <token>`，token 由 /auth/login 签发，有效期见
+config.JWT_EXPIRE_HOURS。权限规则本身在 src/auth/permissions.py，这一层只做转换。
 """
 
 import json
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from src.auth.deps import get_current_user, require_kb_access, user_id_of
 
 router = APIRouter(prefix="/api", tags=["web"])
 
@@ -63,12 +73,83 @@ def health():
     return {"status": "ok", "service": "DataLens Web API"}
 
 
+# ================================================================
+# 认证（注册 / 登录 / 当前用户 / 分享）
+# ================================================================
+
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=32, description="用户名，2-32 字符")
+    password: str = Field(min_length=6, description="密码，至少 6 位")
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ShareRequest(BaseModel):
+    target_username: str = Field(description="分享给谁（用户名）")
+    role: str = Field(default="viewer", description="viewer / editor / owner 之一")
+
+
+@router.post("/auth/register", summary="注册")
+def register(req: RegisterRequest):
+    from src.auth.service import register as _register
+
+    try:
+        return _register(req.username, req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/auth/login", summary="登录（换取 JWT）")
+def login(req: LoginRequest):
+    from src.auth.service import login as _login
+
+    result = _login(req.username, req.password)
+    if not result:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    return result
+
+
+@router.get("/auth/me", summary="当前登录用户")
+def me(user: dict = Depends(get_current_user)):
+    from src.auth.service import get_user
+
+    info = get_user(user_id_of(user))
+    if not info:
+        # token 本身合法、但账号已被删 —— 当作未登录处理，
+        # 否则一个已删除的账号能在 token 过期前继续访问（最长期限 = JWT_EXPIRE_HOURS）
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return info
+
+
+@router.post("/kbs/{kb_id}/share", summary="分享知识库")
+def share_kb_endpoint(kb_id: str, req: ShareRequest, user: dict = Depends(get_current_user)):
+    from src.auth.permissions import find_user_by_username, share_kb
+
+    require_kb_access(kb_id, user, "owner")  # 只有 owner 能授权给别人
+    target = find_user_by_username(req.target_username)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"用户不存在: {req.target_username}")
+    try:
+        share_kb(kb_id, target["id"], req.role)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "kb_id": kb_id, "user": target["username"], "role": req.role}
+
+
+# ================================================================
+# 知识库
+# ================================================================
+
 @router.get("/kbs", summary="知识库列表")
-def get_kbs():
-    from src.database import get_kb_stats, list_kbs
+def get_kbs(user: dict = Depends(get_current_user)):
+    from src.auth.permissions import list_accessible_kbs
+    from src.database import get_kb_stats
 
     result = []
-    for kb in list_kbs():
+    for kb in list_accessible_kbs(user_id_of(user)):
         stats = get_kb_stats(kb["id"])
         try:
             from src.vector_store import collection_count
@@ -84,16 +165,17 @@ def get_kbs():
 
 
 @router.get("/kbs/{kb_id}/docs", summary="某知识库的文档列表")
-def get_docs(kb_id: str):
+def get_docs(kb_id: str, user: dict = Depends(get_current_user)):
     from src.database import get_kb, get_kb_stats, list_documents
 
     if not get_kb(kb_id):
         raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+    require_kb_access(kb_id, user, "viewer")
     return {"kb_id": kb_id, "stats": get_kb_stats(kb_id), "docs": list_documents(kb_id)}
 
 
 @router.post("/ask", response_model=AskResponse, summary="RAG 问答")
-def ask(request: AskRequest):
+def ask(request: AskRequest, user: dict = Depends(get_current_user)):
     """走与 Streamlit 完全相同的 rag_query 链路，返回答案 + 引用 + 门控信息。"""
     from src.answer_gate import top_score
     from src.answer_log import get_answer
@@ -102,6 +184,7 @@ def ask(request: AskRequest):
 
     if not get_kb(request.kb_id):
         raise HTTPException(status_code=404, detail=f"知识库不存在: {request.kb_id}")
+    require_kb_access(request.kb_id, user, "viewer")
 
     history = request.history or None
     result = rag_query(request.kb_id, request.question,
@@ -136,7 +219,7 @@ def _sse(event: str, data: dict) -> str:
 
 
 @router.post("/ask/stream", summary="RAG 问答（SSE 流式，答案逐块推送）")
-def ask_stream(request: AskRequest):
+def ask_stream(request: AskRequest, user: dict = Depends(get_current_user)):
     """与 `/api/ask` 完全同一条链路，只是答案边生成边推送，用于前端打字机效果。
 
     事件序列：
@@ -150,6 +233,7 @@ def ask_stream(request: AskRequest):
 
     if not get_kb(request.kb_id):
         raise HTTPException(status_code=404, detail=f"知识库不存在: {request.kb_id}")
+    require_kb_access(request.kb_id, user, "viewer")
 
     gen, sources, contexts, retrieval_query, log_ref = stream_rag_query(
         request.kb_id, request.question, top_k=request.top_k,
@@ -195,13 +279,21 @@ class FeedbackRequest(BaseModel):
 
 
 @router.post("/feedback", summary="给某条回答打反馈（👍/👎）")
-def feedback(request: FeedbackRequest):
+def feedback(request: FeedbackRequest, user: dict = Depends(get_current_user)):
     """把人工反馈写回 answer_log.rating。
 
     rating 只允许 None / 'up' / 'down'，非法值由 answer_log.set_rating 抛错后转 400。
     带反馈的记录不会被容量淘汰清理，因此这些标注是稳定的信号源。
+
+    权限：入参只有 log_id，必须先查出这条日志属于哪个库才能判权限——
+    否则任何登录用户都能给别人的知识库打反馈，直接污染对方的质量信号。
     """
-    from src.answer_log import set_rating
+    from src.answer_log import get_answer, set_rating
+
+    log = get_answer(request.log_id)
+    if not log:
+        raise HTTPException(status_code=404, detail=f"问答记录不存在: {request.log_id}")
+    require_kb_access(log["kb_id"], user, "viewer")
 
     try:
         hit = set_rating(request.log_id, request.rating)
@@ -214,7 +306,8 @@ def feedback(request: FeedbackRequest):
 
 
 @router.post("/kbs/{kb_id}/upload", summary="上传文档并入库")
-async def upload(kb_id: str, file: UploadFile = File(...)):
+async def upload(kb_id: str, file: UploadFile = File(...),
+                 user: dict = Depends(get_current_user)):
     """与「文档上传」页同一条链路：保存原文 → 解析 → 切块 → 嵌入入库。"""
     from src.chunker import chunk_parsed
     from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, kb_upload_dir
@@ -224,6 +317,7 @@ async def upload(kb_id: str, file: UploadFile = File(...)):
 
     if not get_kb(kb_id):
         raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+    require_kb_access(kb_id, user, "editor")
 
     name = file.filename or "unnamed"
     if not any(name.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS):
@@ -267,38 +361,54 @@ async def upload(kb_id: str, file: UploadFile = File(...)):
 
 
 @router.post("/kbs/{kb_id}/reindex", summary="重建索引")
-def reindex(kb_id: str):
+def reindex(kb_id: str, user: dict = Depends(get_current_user)):
     """用保留的原文按当前分块/嵌入参数重跑全库（src/reindex.py）。"""
     from src.database import get_kb
     from src.reindex import rebuild_kb
 
     if not get_kb(kb_id):
         raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+    require_kb_access(kb_id, user, "editor")
     return rebuild_kb(kb_id)
 
 
 @router.delete("/docs/{doc_id}", summary="删除文档")
-def delete_doc(doc_id: str):
-    """SQLite 记录 + Chroma chunk 双清，避免留下「列表里没了、检索还能搜到」的幽灵引用。"""
-    from src.database import delete_document
+def delete_doc(doc_id: str, user: dict = Depends(get_current_user)):
+    """SQLite 记录 + Chroma chunk 双清，避免留下「列表里没了、检索还能搜到」的幽灵引用。
+
+    权限顺序很重要：**先查 → 再判权限 → 最后才删**。若沿用「先 delete_document
+    再用它的返回值拿 kb_id」，等发现没权限时数据已经没了，权限检查就成了摆设。
+    """
+    from src.database import delete_document, get_document
     from src.vector_store import delete_chunks_by_source
 
-    doc = delete_document(doc_id)
+    doc = get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail=f"文档不存在: {doc_id}")
+    require_kb_access(doc["kb_id"], user, "editor")
+    delete_document(doc_id)
     deleted = delete_chunks_by_source(doc["kb_id"], doc["filename"])
     return {"doc_id": doc_id, "filename": doc["filename"], "deleted_chunks": deleted}
 
 
 @router.get("/answer_log", summary="问答日志 + 缺口清单")
 def answer_log_api(kb_id: str | None = None, limit: int = 50,
-                   only_ungrounded: bool = False, only_rated: bool = False):
+                   only_ungrounded: bool = False, only_rated: bool = False,
+                   user: dict = Depends(get_current_user)):
     """问答日志，可按两类信号筛选（筛选在下层 SQL 完成，不拉全表再过滤）。
 
     · `only_ungrounded` —— 隐式信号：门控没过（库里撑不住这个问法）
     · `only_rated`      —— 显式信号：用户点过 👍/👎 的记录（含"答上了但没用"）
+
+    权限：不传 kb_id 等于要看**所有库**的日志，这是跨库视图，只开放给 admin。
+    普通用户必须显式指定自己有权限的 kb_id——默认拒绝比默认放行安全。
     """
     from src.answer_log import count_answers, gap_stats, list_answers
+
+    if kb_id:
+        require_kb_access(kb_id, user, "viewer")
+    elif user.get("role") != "admin":
+        raise HTTPException(status_code=400, detail="请指定 kb_id（跨库视图仅管理员可用）")
 
     return {
         "kb_id": kb_id,
@@ -310,14 +420,14 @@ def answer_log_api(kb_id: str | None = None, limit: int = 50,
 
 
 @router.get("/eval/history", summary="RAGAS 评估历史存档（摘要列表）")
-def eval_history():
+def eval_history(user: dict = Depends(get_current_user)):
     from src.evaluation_ragas import list_history
 
     return list_history()
 
 
 @router.get("/eval/history/{filename}", summary="加载某一份评估存档的完整结果")
-def eval_history_detail(filename: str):
+def eval_history_detail(filename: str, user: dict = Depends(get_current_user)):
     from src.evaluation_ragas import load_history
 
     data = load_history(filename)
