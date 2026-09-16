@@ -49,7 +49,8 @@ def rebuild_kb(kb_id: str, progress: Callable[[str], None] | None = None) -> dic
     progress: 可选回调，界面用它显示正在处理哪个文件。
     返回 {total, ok, chunks, missing, failed}。
     """
-    from src.database import list_documents, update_document_status
+    from src.database import (compute_content_hash, list_documents,
+                              update_document_hash, update_document_status)
     from src.parser import parse_file
     from src.chunker import chunk_parsed
     from src.vector_store import add_chunks
@@ -82,6 +83,9 @@ def rebuild_kb(kb_id: str, progress: Callable[[str], None] | None = None) -> dic
 
             add_chunks(kb_id, chunks)               # replace_source 默认 True：同源旧块被替换
             update_document_status(doc["id"], "ready", len(chunks))
+            # 重建是按**当前**参数重新切分的，指纹必须跟着刷新——
+            # 否则重建后重传同一份原文不会被查重拦住（旧指纹对应的是旧分块）
+            update_document_hash(doc["id"], compute_content_hash(chunks))
             ok += 1
             total_chunks += len(chunks)
         except Exception as e:

@@ -308,10 +308,14 @@ def feedback(request: FeedbackRequest, user: dict = Depends(get_current_user)):
 @router.post("/kbs/{kb_id}/upload", summary="上传文档并入库")
 async def upload(kb_id: str, file: UploadFile = File(...),
                  user: dict = Depends(get_current_user)):
-    """与「文档上传」页同一条链路：保存原文 → 解析 → 切块 → 嵌入入库。"""
+    """与「文档上传」页同一条链路：保存原文 → 解析 → 切块 → 嵌入入库。
+
+    去重挡在 add_document **之前**：指纹落库后再发现重复，就只能在
+    「留垃圾记录」和「删数据」之间二选一。返回 409，正文说明重复。
+    """
     from src.chunker import chunk_parsed
     from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, kb_upload_dir
-    from src.database import add_document, get_kb, update_document_status
+    from src.database import add_document, check_duplicate, compute_content_hash, get_kb, update_document_status
     from src.parser import parse_file
     from src.vector_store import add_chunks
 
@@ -332,22 +336,32 @@ async def upload(kb_id: str, file: UploadFile = File(...),
     # 原始文件必须留存：它是「重建索引」的唯一素材（改了分块/嵌入参数后要靠它重跑）
     dest = kb_upload_dir(kb_id) / name
     dest.parent.mkdir(parents=True, exist_ok=True)
+    file_existed = dest.exists()  # 同名重传时 dest 覆盖的是**已有文档**的原文，重复时绝不能删
     dest.write_bytes(content)
 
-    doc_id = add_document(kb_id, name, size)
+    doc_id: str | None = None  # parse 在 add_document 之前就可能抛错，此时还没有记录可标 error
     try:
         parsed = parse_file(str(dest))
         if not parsed:
+            doc_id = add_document(kb_id, name, size)
             update_document_status(doc_id, "empty")
             return {"doc_id": doc_id, "filename": name, "status": "empty",
                     "message": "没有可提取的文本内容"}
 
         chunks = chunk_parsed(parsed)
         if not chunks:
+            doc_id = add_document(kb_id, name, size)
             update_document_status(doc_id, "empty")
             return {"doc_id": doc_id, "filename": name, "status": "empty",
                     "message": "内容太短，无法分块"}
 
+        content_hash = compute_content_hash(chunks)
+        if check_duplicate(kb_id, content_hash):
+            if not file_existed:
+                dest.unlink(missing_ok=True)  # 新文件名同内容：删掉孤儿原文，不占磁盘
+            raise HTTPException(status_code=409, detail=f"内容与库中已有文件重复，已跳过入库: {name}")
+
+        doc_id = add_document(kb_id, name, size, content_hash)
         add_chunks(kb_id, chunks)
         update_document_status(doc_id, "ready", len(chunks))
         return {
@@ -355,8 +369,11 @@ async def upload(kb_id: str, file: UploadFile = File(...),
             "paragraphs": len(parsed), "chunks": len(chunks),
             "image_chunks": sum(1 for c in chunks if c.get("type") == "image"),
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        update_document_status(doc_id, "error")
+        if doc_id is not None:
+            update_document_status(doc_id, "error")
         raise HTTPException(status_code=500, detail=f"{name} 处理失败: {e}")
 
 

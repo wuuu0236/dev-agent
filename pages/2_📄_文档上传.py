@@ -5,7 +5,8 @@ import streamlit as st
 from src.auth.deps import require_kb_access_ui, require_login_ui
 from src.auth.permissions import list_accessible_kbs
 from src.database import (add_document, update_document_status,
-                          list_documents, delete_document)
+                          list_documents, delete_document,
+                          check_duplicate, compute_content_hash)
 from src.parser import parse_file
 from src.chunker import chunk_parsed
 from src.vector_store import add_chunks, collection_count, delete_chunks_by_source
@@ -99,6 +100,7 @@ if uploaded_files:
         for i, uf in enumerate(uploaded_files):
             status_text.text(f"正在处理: {uf.name} ({i+1}/{len(uploaded_files)})")
             progress_bar.progress((i) / len(uploaded_files))
+            doc_id = None  # parse 在 add_document 之前就可能抛错，此时还没有记录可标 error
 
             # 检查大小
             if uf.size > MAX_FILE_SIZE_MB * 1024 * 1024:
@@ -110,18 +112,18 @@ if uploaded_files:
             # 换了嵌入模型之后，只有从原文重新切分才能让这份文档应用新规则。
             # 按 kb_id 分目录，避免不同知识库的同名文件互相覆盖。
             file_path = kb_upload_dir(kb_id) / uf.name
+            file_existed = file_path.exists()  # 同名重传时覆盖的是**已有文档**的原文，重复时绝不能删
             with open(file_path, "wb") as f:
                 f.write(uf.getbuffer())
 
-            # 记录到数据库
-            doc_id = add_document(kb_id, uf.name, uf.size)
-
             try:
-                # 1. 解析文档
+                # 1. 解析文档（**先解析后记库**：内容指纹查重要在 add_document 之前做，
+                #    否则重复文件会先留下一条记录再"跳过"，库越来越脏）
                 status_text.text(f"📖 解析: {uf.name}")
                 parsed = parse_file(str(file_path))
 
                 if not parsed:
+                    doc_id = add_document(kb_id, uf.name, uf.size)
                     st.warning(f"⚠️ {uf.name} 没有可提取的文本内容")
                     update_document_status(doc_id, "empty")
                     fail_count += 1
@@ -132,16 +134,29 @@ if uploaded_files:
                 chunks = chunk_parsed(parsed)
 
                 if not chunks:
+                    doc_id = add_document(kb_id, uf.name, uf.size)
                     st.warning(f"⚠️ {uf.name} 内容太短，无法分块")
                     update_document_status(doc_id, "empty")
                     fail_count += 1
                     continue
 
-                # 3. 写入向量库
+                # 3. 内容查重：同一知识库里已有相同内容的文件就跳过（SHA-256，判内容不判文件名）
+                content_hash = compute_content_hash(chunks)
+                if check_duplicate(kb_id, content_hash):
+                    if not file_existed:
+                        file_path.unlink(missing_ok=True)  # 新文件名同内容：删掉孤儿原文
+                    st.warning(f"⚠️ {uf.name} 内容与库中已有文件重复，已跳过入库")
+                    fail_count += 1
+                    continue
+
+                # 4. 记录到数据库
+                doc_id = add_document(kb_id, uf.name, uf.size, content_hash)
+
+                # 5. 写入向量库
                 status_text.text(f"🧮 向量化: {uf.name} ({len(chunks)} chunks)")
                 add_chunks(kb_id, chunks)
 
-                # 4. 更新状态
+                # 6. 更新状态
                 update_document_status(doc_id, "ready", len(chunks))
                 success_count += 1
                 img_chunks = sum(1 for c in chunks if c.get("type") == "image")
@@ -150,7 +165,8 @@ if uploaded_files:
 
             except Exception as e:
                 st.error(f"❌ {uf.name} 处理失败: {str(e)}")
-                update_document_status(doc_id, "error")
+                if doc_id is not None:
+                    update_document_status(doc_id, "error")
                 fail_count += 1
 
         # 完成

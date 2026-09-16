@@ -16,6 +16,7 @@ users / kb_permissions 来自 docs/technical-optimization-plan.md 第一章。�
   - 适合单机小规模应用（< 10万条）
   - 面试官一看就懂，不用解释 PostgreSQL/MySQL
 """
+import hashlib
 import os
 import sqlite3
 import uuid
@@ -83,6 +84,7 @@ def init_db():
         )
     """)
     _migrate_add_column(conn, "knowledge_bases", "owner_id", "TEXT")
+    _migrate_add_column(conn, "documents", "content_hash", "TEXT DEFAULT ''")
     conn.commit()
 
     # users 为空 = 从单用户版本首次升级上来：建默认管理员并认领所有无主知识库。
@@ -208,14 +210,22 @@ def delete_kb(kb_id: str):
 
 # --- 文档操作 ---
 
-def add_document(kb_id: str, filename: str, file_size: int = 0) -> str:
-    """添加文档记录，返回文档 ID"""
+def add_document(kb_id: str, filename: str, file_size: int = 0,
+                 content_hash: str = "") -> str:
+    """添加文档记录，返回文档 ID。
+
+    content_hash：整份文档内容的 SHA-256 指纹（compute_content_hash）。
+    上传路径必须在调用本函数**之前**查重（check_duplicate）——
+    指纹落了库再发现重复，就只能在"留垃圾行"和"删数据"之间二选一了。
+    默认空串：脚本灌库路径（seed / build_eval_kb）不算指纹也能工作。
+    """
     conn = get_connection()
     doc_id = str(uuid.uuid4())[:8]
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     conn.execute(
-        "INSERT INTO documents (id, kb_id, filename, file_size, status, created_at) VALUES (?, ?, ?, ?, 'processing', ?)",
-        (doc_id, kb_id, filename, file_size, now)
+        "INSERT INTO documents (id, kb_id, filename, file_size, status, content_hash, created_at) "
+        "VALUES (?, ?, ?, ?, 'processing', ?, ?)",
+        (doc_id, kb_id, filename, file_size, content_hash, now)
     )
     conn.commit()
     conn.close()
@@ -231,6 +241,46 @@ def update_document_status(doc_id: str, status: str, chunk_count: int = 0):
     )
     conn.commit()
     conn.close()
+
+
+def update_document_hash(doc_id: str, content_hash: str):
+    """刷新文档的内容指纹。唯一调用方是 reindex：重建会按**当前**参数重新切分，
+    指纹必须跟着刷新，否则重建后重传同一份原文不会被判重。"""
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE documents SET content_hash = ? WHERE id = ?", (content_hash, doc_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def compute_content_hash(chunks: list[dict]) -> str:
+    """对分块结果计算整份文档的 SHA-256 内容指纹。
+
+    只拼 chunk 内容、不含文件名 —— 去重判的是「内容一样」：
+    同名不同内容要照常入库，不同名同内容才该被拦。
+    收口在 database 而不是 vector_store：查重查的是 documents 表（SQLite），
+    vector_store 是 Chroma 的封装，语义不该混。
+    """
+    combined = "\n".join(c["content"] for c in chunks)
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+
+def check_duplicate(kb_id: str, content_hash: str) -> bool:
+    """同一知识库里是否已有相同内容指纹的 ready 文档（跨文件名）。
+
+    只认 status='ready'：解析失败 / 空内容的记录不算"库里已有"。
+    老数据该列默认 ''，不会被任何真实指纹命中，天然兼容。
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE kb_id = ? AND content_hash = ? AND status = 'ready'",
+            (kb_id, content_hash),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] > 0
 
 
 def get_document(doc_id: str) -> dict | None:
