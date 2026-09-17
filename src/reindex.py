@@ -53,6 +53,7 @@ def rebuild_kb(kb_id: str, progress: Callable[[str], None] | None = None) -> dic
                               update_document_hash, update_document_status)
     from src.parser import parse_file
     from src.chunker import chunk_parsed
+    from src.contextualizer import build_full_document, contextualize_chunks
     from src.vector_store import add_chunks
 
     docs = list_documents(kb_id)
@@ -81,11 +82,17 @@ def rebuild_kb(kb_id: str, progress: Callable[[str], None] | None = None) -> dic
                 failed.append((name, "没有可用的文本内容"))
                 continue
 
+            # 指纹必须按**原始** chunk 内容算：contextualize 加的 LLM 前缀
+            # 有措辞不确定性，会让同一文件重传时指纹对不上、绕过查重
+            content_hash = compute_content_hash(chunks)
+            # Contextual Retrieval：开关关闭时 no-op；重建即按当前配置重跑，开关状态自然生效
+            chunks = contextualize_chunks(chunks, build_full_document(parsed))
+
             add_chunks(kb_id, chunks)               # replace_source 默认 True：同源旧块被替换
             update_document_status(doc["id"], "ready", len(chunks))
             # 重建是按**当前**参数重新切分的，指纹必须跟着刷新——
             # 否则重建后重传同一份原文不会被查重拦住（旧指纹对应的是旧分块）
-            update_document_hash(doc["id"], compute_content_hash(chunks))
+            update_document_hash(doc["id"], content_hash)
             ok += 1
             total_chunks += len(chunks)
         except Exception as e:

@@ -9,6 +9,7 @@ from src.database import (add_document, update_document_status,
                           check_duplicate, compute_content_hash)
 from src.parser import parse_file
 from src.chunker import chunk_parsed
+from src.contextualizer import build_full_document, contextualize_chunks
 from src.vector_store import add_chunks, collection_count, delete_chunks_by_source
 from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, kb_upload_dir
 
@@ -148,6 +149,12 @@ if uploaded_files:
                     st.warning(f"⚠️ {uf.name} 内容与库中已有文件重复，已跳过入库")
                     fail_count += 1
                     continue
+
+                # 3.5 Contextual Retrieval：给 chunk 拼文档级上下文前缀（开关关闭时 no-op）。
+                #     必须在指纹计算**之后**——LLM 输出不确定，加前缀后再算指纹，
+                #     同一文件重传可能因描述措辞不同而绕过查重
+                status_text.text(f"🧠 生成上下文: {uf.name}")
+                chunks = contextualize_chunks(chunks, build_full_document(parsed))
 
                 # 4. 记录到数据库
                 doc_id = add_document(kb_id, uf.name, uf.size, content_hash)

@@ -155,6 +155,16 @@ RETRIEVAL_MIN_SCORE = float(os.getenv("RETRIEVAL_MIN_SCORE", "0.3"))
 DIRECT_RETURN_ENABLED = os.getenv("DIRECT_RETURN_ENABLED", "false").lower() == "true"
 DIRECT_RETURN_THRESHOLD = float(os.getenv("DIRECT_RETURN_THRESHOLD", "0.92"))
 
+# --- Contextual Retrieval（入库前给 chunk 生成文档级上下文）---
+# 原理：入库时用 LLM 给每个 chunk 生成一句「这个片段在整篇文档里的位置和语境」，
+# 以 `[描述] ` 前缀拼在 chunk 内容前面再嵌入——半截语境的 chunk（"循环一直持续"）
+# 不再仅凭字面误命中，Anthropic 实测能显著降低检索失败率。
+# ⚠️ 成本：入库时**每个 chunk 一次 LLM 调用**（时间与账单随 chunk 数线性增长），
+# 检索阶段零额外开销。默认关闭，适合"传一次、查很久"的库；频繁换文档的库慎开。
+CONTEXTUAL_RETRIEVAL_ENABLED = os.getenv("CONTEXTUAL_RETRIEVAL_ENABLED", "false").lower() == "true"
+CONTEXTUAL_MODEL = os.getenv("CONTEXTUAL_MODEL", "deepseek-chat")  # 生成上下文用的便宜模型即可
+CONTEXTUAL_DOCUMENT_MAX_CHARS = int(os.getenv("CONTEXTUAL_DOCUMENT_MAX_CHARS", "8000"))  # 送审原文截断长度
+
 # --- 语义缓存（RAG 问答路径）---
 # 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。
 # 失效：知识库文档变化时清空该库缓存（见 vector_store 的 clear_kb_cache 钩子）。

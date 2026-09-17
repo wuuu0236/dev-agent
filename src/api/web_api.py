@@ -315,6 +315,7 @@ async def upload(kb_id: str, file: UploadFile = File(...),
     """
     from src.chunker import chunk_parsed
     from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, kb_upload_dir
+    from src.contextualizer import build_full_document, contextualize_chunks
     from src.database import add_document, check_duplicate, compute_content_hash, get_kb, update_document_status
     from src.parser import parse_file
     from src.vector_store import add_chunks
@@ -360,6 +361,11 @@ async def upload(kb_id: str, file: UploadFile = File(...),
             if not file_existed:
                 dest.unlink(missing_ok=True)  # 新文件名同内容：删掉孤儿原文，不占磁盘
             raise HTTPException(status_code=409, detail=f"内容与库中已有文件重复，已跳过入库: {name}")
+
+        # Contextual Retrieval：入库前给 chunk 拼文档级上下文前缀（开关关闭时 no-op）。
+        # 必须在指纹计算**之后**——LLM 输出不确定，加了前缀再算指纹，
+        # 同一文件重传可能因描述措辞不同而绕过查重。
+        chunks = contextualize_chunks(chunks, build_full_document(parsed))
 
         doc_id = add_document(kb_id, name, size, content_hash)
         add_chunks(kb_id, chunks)
