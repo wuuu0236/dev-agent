@@ -194,6 +194,16 @@ ANSWER_VERIFY_THRESHOLD = int(os.getenv("ANSWER_VERIFY_THRESHOLD", "3"))  # 低�
 # multi-hop 额外付一次分解调用 + 多路粗排。失败一律按 simple 降级。
 ADAPTIVE_ROUTING_ENABLED = os.getenv("ADAPTIVE_ROUTING_ENABLED", "false").lower() == "true"
 
+# --- Parent-Child 邻域扩展（检索用小块、生成用大块，默认关）---
+# 原理：精排命中后按 source + chunk_index 把相邻块拉回来合并成邻域大块再给
+# LLM——小块检索准（500 字块语义聚焦），大块生成全（答案不缺前后文）。
+# 无数据库变更：metadata 本就存着 chunk_index。命中原文存进 original_content，
+# 引用展示仍显示精排命中的原始 chunk（citations 优先取它）。
+# 成本：检索阶段零额外 API；每次命中多一次 Chroma 范围查询（本地毫秒级）。
+CONTEXT_EXPANSION_ENABLED = os.getenv("CONTEXT_EXPANSION_ENABLED", "false").lower() == "true"
+CONTEXT_EXPAND_NEIGHBORS = int(os.getenv("CONTEXT_EXPAND_NEIGHBORS", "2"))  # 前后各取几块
+CONTEXT_EXPAND_MAX_CHARS = int(os.getenv("CONTEXT_EXPAND_MAX_CHARS", "2000"))  # 合并文本上限
+
 # --- 语义缓存（RAG 问答路径）---
 # 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。
 # 失效：知识库文档变化时清空该库缓存（见 vector_store 的 clear_kb_cache 钩子）。

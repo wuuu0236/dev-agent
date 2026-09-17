@@ -132,6 +132,9 @@ def search_similar(kb_id: str, query: str, top_k: int = 5) -> list[dict]:
             "page": results["metadatas"][0][i].get("page", 0),
             "type": results["metadatas"][0][i].get("type", "text"),
             "image": results["metadatas"][0][i].get("image") or None,
+            # chunk_index 透传：metadata 里一直存着，但此前没带出来——
+            # Parent-Child 邻域扩展要靠它定位相邻块（见 src/context_expander.py）
+            "chunk_index": results["metadatas"][0][i].get("chunk_index", 0),
             "score": 1 - results["distances"][0][i]  # Chroma 返回距离，转成相似度
         }
         for i in range(len(results["documents"][0]))
@@ -154,10 +157,41 @@ def get_all_chunks(kb_id: str) -> list[dict]:
             "page": results["metadatas"][i].get("page", 0),
             "type": results["metadatas"][i].get("type", "text"),
             "image": results["metadatas"][i].get("image") or None,
+            # 同 search_similar：BM25 路的候选也要能被邻域扩展定位
+            "chunk_index": results["metadatas"][i].get("chunk_index", 0),
             "chunk_id": results["ids"][i]
         }
         for i in range(len(results["documents"]))
     ]
+
+
+def get_chunks_by_source_range(kb_id: str, source: str,
+                               start_idx: int, end_idx: int) -> list[dict]:
+    """按 source 和 chunk_index 范围取 chunk（升序），Parent-Child 邻域扩展专用。
+
+    为什么走 metadata 过滤而不是把整库拉回来挑：扩展只发生在检索命中之后，
+    每次命中按范围精准取，库大时也不至于为了扩 5 个块搬全库。
+    """
+    client = _get_client()
+    collection = client.get_collection(_collection_name(kb_id))
+    results = collection.get(
+        where={"$and": [
+            {"source": {"$eq": source}},
+            {"chunk_index": {"$gte": start_idx}},
+            {"chunk_index": {"$lte": end_idx}},
+        ]},
+        include=["documents", "metadatas"],
+    )
+    chunks = []
+    for i in range(len(results["ids"])):
+        chunks.append({
+            "content": results["documents"][i],
+            "source": results["metadatas"][i].get("source", ""),
+            "page": results["metadatas"][i].get("page", 0),
+            "chunk_index": results["metadatas"][i].get("chunk_index", 0),
+        })
+    chunks.sort(key=lambda c: c["chunk_index"])
+    return chunks
 
 
 def _clear_query_cache(kb_id: str):

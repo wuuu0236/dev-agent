@@ -51,6 +51,16 @@ def _append_snippet(entry: dict, content: str) -> None:
         entry["snippets"].append(snip)
 
 
+def _display_content(c: dict) -> str:
+    """引用展示用的内容。
+
+    Parent-Child 扩展（src/context_expander.py）后 content 是邻域合并文本——
+    那是给模型的；用户展开引用要核实的是**精排命中的原始 chunk**，
+    所以扩展条目优先取 original_content。
+    """
+    return c.get("original_content") or c.get("content", "")
+
+
 def unique_sources(contexts: list[dict]) -> list[dict]:
     """按来源去重整理检索结果；同一文档命中多段时，片段合并在该来源下。
 
@@ -68,7 +78,7 @@ def unique_sources(contexts: list[dict]) -> list[dict]:
         if src not in by_source:
             by_source[src] = _entry(c)
             order.append(src)
-        _append_snippet(by_source[src], c.get("content", ""))
+        _append_snippet(by_source[src], _display_content(c))
     return [by_source[s] for s in order]
 
 
@@ -96,5 +106,5 @@ def extract_cited_sources(answer: str, contexts: list[dict]) -> list[dict]:
         if src not in by_source:
             by_source[src] = _entry(c)
             order.append(src)
-        _append_snippet(by_source[src], c.get("content", ""))
+        _append_snippet(by_source[src], _display_content(c))
     return [by_source[s] for s in order]

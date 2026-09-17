@@ -44,9 +44,12 @@ from src.config import (
     LLM_BACKEND, OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_VISION_MODEL,
     RAG_HISTORY_TURNS, DIRECT_RETURN_ENABLED, DIRECT_RETURN_THRESHOLD,
     ANSWER_VERIFY_ENABLED, ANSWER_VERIFY_THRESHOLD,
+    CONTEXT_EXPANSION_ENABLED,
 )
 # 查询路由：检索前判断 chitchat / simple / multi-hop（关闭时恒 simple，零成本）
 from src.query_router import classify_query, decompose_query
+# Parent-Child：精排命中小块后拉相邻块合并成大块给 LLM（引用仍显示命中原文）
+from src.context_expander import expand_contexts
 # 生产检索器：基于 Chroma + BM25 + RRF，按 kb_id 检索（与已部署版本一致）
 from src.hybrid_retriever import HybridRetriever
 # 查询改写：多轮追问先消解指代再检索（无历史时零成本原样返回）
@@ -451,6 +454,13 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             print(f"[AnswerVerifier] 初版 {first_score}/5 低于阈值 {ANSWER_VERIFY_THRESHOLD}，"
                   f"严格重试 {strict_score}/5，采用{kept}", file=sys.stderr, flush=True)
 
+    # 4.7 Parent-Child 邻域扩展（docs 第三章）：检索用小块、生成用大块。
+    # 放在门控/直接返回**之后**——两者看到的都是精排命中的原始 chunk
+    # （直接返回的"原文如下"不该掺进邻域噪声）。命中原文已存 original_content，
+    # 引用展示不受影响（citations 优先取它）。
+    if CONTEXT_EXPANSION_ENABLED and contexts:
+        contexts = expand_contexts(contexts, kb_id)
+
     # 5. 整理引用来源：按文档去重 + 附命中原文（用户展开即可核实，见 src/citations.py）
     sources = citations.unique_sources(contexts)
 
@@ -579,6 +589,13 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             yield direct
 
         return gen_direct(), sources, contexts, retrieval_query, log_ref
+
+    # Parent-Child 邻域扩展（docs 第三章，同 rag_query）：放在门控/直接返回之后、
+    # 生成之前。命中原文已存 original_content，引用展示不受影响。
+    # ⚠️ CRAG 流式自检（gen 内）用的 contexts 也会是扩展后的——验证的是
+    # "答案是否基于给模型的上下文"，用扩展后的文本口径才对。
+    if CONTEXT_EXPANSION_ENABLED and contexts:
+        contexts = expand_contexts(contexts, kb_id)
 
     def gen():
         full_answer = ""
