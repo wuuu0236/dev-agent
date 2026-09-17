@@ -42,7 +42,7 @@ from openai import OpenAI
 from src.config import (
     LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TEMPERATURE, TOP_K_RETRIEVE,
     LLM_BACKEND, OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_VISION_MODEL,
-    RAG_HISTORY_TURNS,
+    RAG_HISTORY_TURNS, DIRECT_RETURN_ENABLED, DIRECT_RETURN_THRESHOLD,
 )
 # 生产检索器：基于 Chroma + BM25 + RRF，按 kb_id 检索（与已部署版本一致）
 from src.hybrid_retriever import HybridRetriever
@@ -126,6 +126,32 @@ NO_CONTEXT_SYSTEM_PROMPT = """你是一个基于知识库的问答助手。
 3. 只有当问题属于通用常识或寒暄（如问候、简单算术）时，才可以简短正常回答，
    并说明这不来自知识库。
 4. 回答简洁，用中文。"""
+
+
+def _direct_return_answer(contexts: list[dict]) -> str | None:
+    """高相似直接返回（docs/technical-optimization-plan.md 第六章）：
+    精排最高分超过阈值时，跳过 LLM、把 top1 原文直接作为答案。不触发返回 None。
+
+    为什么放在门控**之后**：DIRECT_RETURN_THRESHOLD（0.92）远高于门控阈值
+    （0.3），能触发直接返回的必然已过门控——放门控前判断只会重复算一遍分数。
+
+    答案带 [1] 引用标记：sources[0] 就是这段原文（citations.unique_sources 的
+    第一条），前端「点击序号联动引用」的机制照常工作，用户仍可核实原文。
+
+    已知取舍：回答是原文照搬，没有针对问题的综合与语气——这是用「转述质量」
+    换「零幻觉 + 省一次 LLM 调用」。阈值给到 0.92（几乎逐字命中）时这笔交换
+    是划算的；调低阈值会更快看到生硬的答案。
+    """
+    if not DIRECT_RETURN_ENABLED or not contexts:
+        return None
+    if top_score(contexts) < DIRECT_RETURN_THRESHOLD:
+        return None
+    best = contexts[0]
+    loc = best.get("source", "")
+    if best.get("page"):
+        loc += f" 第{best['page']}页"
+    where = f"（{loc}）" if loc else ""
+    return f"知识库中有与问题高度匹配的内容{where}，原文如下：\n\n[1] {best['content']}"
 
 
 def _vision_ground(query: str, image_paths: list[str], vision_model: str, base_url: str) -> str:
@@ -319,6 +345,20 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
         contexts = []
 
     # 4. 生成（带最近对话历史，多轮追问有上下文）
+    # 4.5 高相似直接返回：分数高到几乎逐字命中时跳过 LLM，原文即答案（零幻觉 + 省一次调用）。
+    # 返回值结构与常规路径完全一致（文档红线），backend 记 "direct_return" 供日志归因。
+    direct = _direct_return_answer(contexts)
+    if direct:
+        sources = citations.unique_sources(contexts)
+        log_id = _log_answer(
+            kb_id=kb_id, question=query, retrieval_query=retrieval_query, answer=direct,
+            grounded=True, gate_score=gate_score, backend="direct_return",
+            hits=ground_hits,
+        )
+        return {"answer": direct, "sources": sources, "contexts": contexts,
+                "grounded": True, "query": query, "retrieval_query": retrieval_query,
+                "log_id": log_id}
+
     answer = generate_answer(query, contexts, backend=backend, vision_model=vision_model,
                              history=history, grounded=grounded)
 
@@ -415,6 +455,27 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
 
     # 整理引用来源（与 rag_query 同一套逻辑，已收口到 src/citations.py）
     sources = citations.unique_sources(contexts)
+
+    # 高相似直接返回：分数高到几乎逐字命中时跳过 LLM，原文即答案。
+    # 返回结构与常规路径一致（5 元组）；与缓存命中分支同款"一次性 yield"。
+    direct = _direct_return_answer(contexts)
+    if direct:
+        log_ref["id"] = _log_answer(
+            kb_id=kb_id, question=query, retrieval_query=retrieval_query,
+            answer=direct, grounded=True, gate_score=gate_score,
+            backend="direct_return", hits=ground_hits,
+        )
+        # 无历史才缓存（与常规路径同一规则）：direct 答案是确定性的，缓存绝对安全
+        if not history:
+            try:
+                cache_answer(kb_id, query, direct, sources)
+            except Exception:
+                pass  # 缓存失败不影响回答
+
+        def gen_direct():
+            yield direct
+
+        return gen_direct(), sources, contexts, retrieval_query, log_ref
 
     def gen():
         full_answer = ""

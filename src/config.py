@@ -146,6 +146,15 @@ RERANK_MAX_DOC_CHARS = int(os.getenv("RERANK_MAX_DOC_CHARS", "1500"))  # 单条�
 # 未命中时的处理：不把低分上下文喂给 LLM，改由 NO_CONTEXT_SYSTEM_PROMPT 如实说明。
 RETRIEVAL_MIN_SCORE = float(os.getenv("RETRIEVAL_MIN_SCORE", "0.3"))
 
+# --- 高相似直接返回（跳过 LLM）---
+# 精排最高分超过该阈值时，跳过 LLM 生成、把 top1 原文直接作为答案返回。
+# 省一次 LLM 调用（延迟与账单），且**原文即答案 = 零幻觉**——分数高到这个程度，
+# 说明库里有一段几乎就是答案本身的内容，再让模型转述只会引入转述误差。
+# 必须显著高于门控阈值 0.3：门控管「能不能答」，这里管「答案已经白给到不用答」。
+# 已知代价：回答是原文照搬，不带综合与语气；追问场景下观感可能生硬。
+DIRECT_RETURN_ENABLED = os.getenv("DIRECT_RETURN_ENABLED", "false").lower() == "true"
+DIRECT_RETURN_THRESHOLD = float(os.getenv("DIRECT_RETURN_THRESHOLD", "0.92"))
+
 # --- 语义缓存（RAG 问答路径）---
 # 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。
 # 失效：知识库文档变化时清空该库缓存（见 vector_store 的 clear_kb_cache 钩子）。
