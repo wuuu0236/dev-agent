@@ -165,6 +165,16 @@ CONTEXTUAL_RETRIEVAL_ENABLED = os.getenv("CONTEXTUAL_RETRIEVAL_ENABLED", "false"
 CONTEXTUAL_MODEL = os.getenv("CONTEXTUAL_MODEL", "deepseek-chat")  # 生成上下文用的便宜模型即可
 CONTEXTUAL_DOCUMENT_MAX_CHARS = int(os.getenv("CONTEXTUAL_DOCUMENT_MAX_CHARS", "8000"))  # 送审原文截断长度
 
+# --- Multi-Query 查询扩展（检索侧，默认关）---
+# 原理：检索前把问题改写成 N 个不同角度的等价表述，各召回一路，RRF 跨查询
+# 融合后**精排只做一次**。弥补单一表述召不全的问题（向量检索对措辞敏感：
+# 换个说法可能命中的块完全不同，多角度能把这个方差平均掉）。
+# 成本：每问多一次 LLM 调用（生成扩展）+ N 路粗排（embedding 次数翻倍，
+# 但向量检索毫秒级可忽略）；精排账单不变。与 query_rewrite 的分工：
+# rewrite 管指代消解（先），expand 管表述多样性（后）。
+QUERY_EXPANSION_ENABLED = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
+QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))  # 含原始 query 在内的总查询数
+
 # --- 语义缓存（RAG 问答路径）---
 # 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。
 # 失效：知识库文档变化时清空该库缓存（见 vector_store 的 clear_kb_cache 钩子）。

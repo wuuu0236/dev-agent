@@ -146,7 +146,20 @@ class HybridRetriever:
         """
         # 候选池：0 表示自动 = top_k * 10
         candidate_k = RETRIEVE_CANDIDATES or top_k * 10
+        sorted_results = self._collect_candidates(query, candidate_k)
 
+        # --- Rerank 精排（交叉编码）---
+        # 失败会自动降级为「粗排顺序的前 top_k」，不会打断问答链路
+        from src.reranker import rerank as _rerank
+        return _rerank(query, sorted_results, top_k, enabled=rerank)
+
+    def _collect_candidates(self, query: str, candidate_k: int) -> list[dict]:
+        """单查询粗排：向量 + BM25 两路召回 → RRF 融合 → 截断回候选池。
+
+        从 search() 抽出的公共路径——search()（单查询）与 search_multi()
+        （多查询联合）都要走它。返回融合排序后、已截断到 candidate_k 的
+        候选列表（**未精排**）。
+        """
         # --- 向量检索（粗排）---
         from src.vector_store import search_similar  # 惰性：只有真查库才拖 chromadb
         vector_results = search_similar(self.kb_id, query, top_k=candidate_k)
@@ -223,12 +236,42 @@ class HybridRetriever:
         # 注意这不是简单的"砍掉尾巴"：截断发生在**融合之后**，所以两路都排得靠前
         # 的块会被顶上来，把只有一路支持的低分块挤出去。这正是 RRF 想要的效果——
         # 用有限的预算装下"多路共识"的候选。
-        sorted_results = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)[:candidate_k]
+        return sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)[:candidate_k]
 
-        # --- Rerank 精排（交叉编码）---
-        # 失败会自动降级为「粗排顺序的前 top_k」，不会打断问答链路
+    def search_multi(self, queries: list[str], top_k: int = TOP_K_RETRIEVE,
+                     rerank: bool | None = None) -> list[dict]:
+        """多查询联合检索（Multi-Query Expansion 的检索侧）。
+
+        与「逐个 search() 再合并结果」的区别（账单与排序质量的关键）：
+          · **精排只做一次**——search() 每次调用都含交叉编码精排，逐个调用
+            会让每个扩展查询各付一次精排账单；
+          · 跨查询共识在**精排之前**融合：同一块被多个表述命中时 RRF 分数
+            跨查询累加，精排能看到"多角度都说相关"的证据——这正是
+            multi-query 的收益来源。
+
+        queries[0] 视为主查询：去重保序以它打头，精排打分也用它
+        （交叉编码器一次只接受一个 query，其余查询只参与候选召回）。
+        单元素列表的行为与 search() 完全一致。
+        """
+        candidate_k = RETRIEVE_CANDIDATES or top_k * 10
+
+        # 各查询先各自粗排，再跨查询融合（key 与单查询 RRF 相同：source + content 前 50 字）
+        merged: dict[str, dict] = {}
+        for q in queries:
+            for r in self._collect_candidates(q, candidate_k):
+                key = f"{r['source']}_{r['content'][:50]}"
+                if key in merged:
+                    merged[key]["rrf_score"] += r["rrf_score"]
+                else:
+                    merged[key] = dict(r)  # 拷贝：跨查询累加不能改到共享的 dict
+
+        # 融合后仍要截断回候选池：N 路各出 candidate_k 条，合起来不截断的话
+        # 精排账单又跟查询数挂钩了（与单查询截断是同一条预算原则）
+        fused = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)[:candidate_k]
+
+        # --- Rerank 精排（交叉编码，只做一次，打分用主查询）---
         from src.reranker import rerank as _rerank
-        return _rerank(query, sorted_results, top_k, enabled=rerank)
+        return _rerank(queries[0], fused, top_k, enabled=rerank)
 # ================================================================
 # 模块级函数：供 Agent 和 MCP 调用（统一入口）
 # ================================================================

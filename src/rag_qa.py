@@ -48,6 +48,8 @@ from src.config import (
 from src.hybrid_retriever import HybridRetriever
 # 查询改写：多轮追问先消解指代再检索（无历史时零成本原样返回）
 from src.query_rewrite import rewrite_query
+# 查询扩展：单一表述召不全时多角度各召回一路再融合（关闭/失败时退回单查询）
+from src.query_expand import expand_query
 # 检索质量门控：精排分数低于阈值时不注入上下文，如实说"不知道"（防幻觉）
 from src.answer_gate import is_grounded, top_score
 # 引用来源整理（按文档去重 + 附命中原文，让引用可核实）
@@ -152,6 +154,21 @@ def _direct_return_answer(contexts: list[dict]) -> str | None:
         loc += f" 第{best['page']}页"
     where = f"（{loc}）" if loc else ""
     return f"知识库中有与问题高度匹配的内容{where}，原文如下：\n\n[1] {best['content']}"
+
+
+def _retrieve_contexts(kb_id: str, retrieval_query: str, top_k: int) -> list[dict]:
+    """检索收口：查询扩展开启时多角度联合检索，否则单查询（两条问答路径共用）。
+
+    expand_query 关闭 / 失败时返回 [retrieval_query] 单元素列表 → 走 search()，
+    行为与扩展开关不存在时完全一致；扩展成功时走 search_multi()，
+    N 路候选在精排之前融合，精排只做一次（账单不随查询数翻倍）。
+    展示用的改写问句仍是 rewrite_query 的单个结果，与扩展无关。
+    """
+    retriever = HybridRetriever(kb_id)
+    expanded = expand_query(retrieval_query)
+    if len(expanded) <= 1:
+        return retriever.search(retrieval_query, top_k=top_k)
+    return retriever.search_multi(expanded, top_k=top_k)
 
 
 def _vision_ground(query: str, image_paths: list[str], vision_model: str, base_url: str) -> str:
@@ -309,9 +326,8 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # 1. 追问消解：历史 + 当前问题 → 自包含的检索 query（无历史 / 失败则原样返回）
     retrieval_query = rewrite_query(query, history)
 
-    # 2. 检索
-    retriever = HybridRetriever(kb_id)
-    contexts = retriever.search(retrieval_query, top_k=top_k)
+    # 2. 检索（查询扩展开启时多角度召回，精排仍只做一次；关闭时行为不变）
+    contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
 
     if not contexts:
         answer = "知识库中没有找到相关内容，请先上传文档。"
@@ -428,8 +444,7 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # 注意只作用于检索——生成阶段仍用用户原话，历史另由 _prepare_generation 注入。
     retrieval_query = rewrite_query(query, history)
 
-    retriever = HybridRetriever(kb_id)
-    contexts = retriever.search(retrieval_query, top_k=top_k)
+    contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
 
     if not contexts:
         fallback = "知识库中没有找到相关内容，请先上传文档。"
