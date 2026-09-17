@@ -34,6 +34,7 @@ def env(tmp_path, monkeypatch):
         "docs": [],
         "added": [],          # add_chunks 收到 (kb_id, chunks)
         "status": [],         # update_document_status 收到 (doc_id, status, count)
+        "hashes": [],         # update_document_hash 收到 (doc_id, content_hash)
         "parsed": [],         # parse_file 收到路径
         "empty_parse": set(),  # 这些文件的解析结果为空
         "empty_chunk": set(),  # 这些文件切不出块
@@ -66,6 +67,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         db, "update_document_status",
         lambda doc_id, status, count=0: box["status"].append((doc_id, status, count)),
+    )
+    # 指纹刷新（模块二起 rebuild 成功路径会调用）：不桩的话会打到**真 SQLite**——
+    # 本地有 data/datalens.db 所以永远测不出来，CI 没有 data 目录就是
+    # OperationalError: no such table，rebuild 全部 ok=0（2026-09-18 CI 实录）。
+    monkeypatch.setattr(
+        db, "update_document_hash",
+        lambda doc_id, content_hash: box["hashes"].append((doc_id, content_hash)),
     )
     monkeypatch.setattr(parser, "parse_file", fake_parse)
     monkeypatch.setattr(chunker, "chunk_parsed", fake_chunk)
