@@ -47,6 +47,7 @@ MODULES = [
     "src.reranker",
     "src.query_rewrite",
     "src.query_expand",
+    "src.answer_verifier",
     "src.contextualizer",      # LLM 客户端惰性构造（_get_client），导入期不碰凭据
     "src.evaluation",          # 经 src.rag_qa 依赖 langfuse → 靠下面替身兜住
     "src.tools.safety",

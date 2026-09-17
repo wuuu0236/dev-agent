@@ -43,6 +43,7 @@ from src.config import (
     LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_TEMPERATURE, TOP_K_RETRIEVE,
     LLM_BACKEND, OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_VISION_MODEL,
     RAG_HISTORY_TURNS, DIRECT_RETURN_ENABLED, DIRECT_RETURN_THRESHOLD,
+    ANSWER_VERIFY_ENABLED, ANSWER_VERIFY_THRESHOLD,
 )
 # 生产检索器：基于 Chroma + BM25 + RRF，按 kb_id 检索（与已部署版本一致）
 from src.hybrid_retriever import HybridRetriever
@@ -50,6 +51,8 @@ from src.hybrid_retriever import HybridRetriever
 from src.query_rewrite import rewrite_query
 # 查询扩展：单一表述召不全时多角度各召回一路再融合（关闭/失败时退回单查询）
 from src.query_expand import expand_query
+# CRAG 生成后自检：验证答案是否真的基于上下文，不达标触发严格重试（失败即放行）
+from src.answer_verifier import verify_answer
 # 检索质量门控：精排分数低于阈值时不注入上下文，如实说"不知道"（防幻觉）
 from src.answer_gate import is_grounded, top_score
 # 引用来源整理（按文档去重 + 附命中原文，让引用可核实）
@@ -129,6 +132,17 @@ NO_CONTEXT_SYSTEM_PROMPT = """你是一个基于知识库的问答助手。
    并说明这不来自知识库。
 4. 回答简洁，用中文。"""
 
+# CRAG 生成后自检的「严格重试」提示（见 src/answer_verifier.py）。
+# 与 SYSTEM_PROMPT 的区别：删掉「可根据常识回答」的口子，并点名上一个版本
+# 的问题——只允许复述上下文里有依据的内容，没依据就明说，绝不许编。
+STRICT_ANSWER_SYSTEM_PROMPT = """你是一个基于知识库的问答助手。上一版答案被判定为「不完全基于参考文档」。
+
+规则：
+1. 只复述参考文档中有直接依据的信息，一个字都不许编。
+2. 参考文档不足以回答的部分，明确说「文档中未提及」，不许推断补齐。
+3. 回答要简洁、准确，用中文。
+4. 引用参考文档时，在引用内容后标注来源序号，格式：[1]、[2]……"""
+
 
 def _direct_return_answer(contexts: list[dict]) -> str | None:
     """高相似直接返回（docs/technical-optimization-plan.md 第六章）：
@@ -207,7 +221,8 @@ def _prepare_generation(query: str, contexts: list[dict],
                         base_url: str | None = None,
                         llm_model: str | None = None,
                         history: list[dict] | None = None,
-                        grounded: bool = True) -> tuple:
+                        grounded: bool = True,
+                        system_prompt_override: str | None = None) -> tuple:
     """组装生成请求：视觉接地 + 上下文 + 最近对话历史 + 选客户端。
 
     generate_answer（非流式）与 stream_generate_answer（流式）共用，
@@ -219,6 +234,9 @@ def _prepare_generation(query: str, contexts: list[dict],
     grounded: 检索结果是否足以支撑回答（见 src/answer_gate.py）。False 时
     **一份参考文档都不注入**，改用 NO_CONTEXT_SYSTEM_PROMPT 如实说明没找到——
     低分上下文喂给模型只会诱发幻觉，不如不喂。
+
+    system_prompt_override: 覆盖 grounded 分支默认的 SYSTEM_PROMPT（CRAG 自检
+    的严格重试用）。仅在 grounded=True 时生效。
     """
     backend = backend or LLM_BACKEND
     vision_model = vision_model if vision_model is not None else OLLAMA_VISION_MODEL
@@ -252,7 +270,7 @@ def _prepare_generation(query: str, contexts: list[dict],
             text_parts.append(f"[文档 {len(contexts) + 1}] 来源: 本地视觉模型({vision_model}) 识别结果\n{vision_text}")
 
         context_text = "\n\n---\n\n".join(text_parts)
-        system_prompt = SYSTEM_PROMPT
+        system_prompt = system_prompt_override or SYSTEM_PROMPT
         user_message = f"参考文档：\n\n{context_text}\n\n问题：{query}\n\n请基于参考文档回答，并标注引用来源。"
 
     # --- 选择 LLM 客户端 ---
@@ -284,11 +302,13 @@ def generate_answer(query: str, contexts: list[dict],
                     base_url: str | None = None,
                     llm_model: str | None = None,
                     history: list[dict] | None = None,
-                    grounded: bool = True) -> str:
+                    grounded: bool = True,
+                    system_prompt_override: str | None = None) -> str:
     """基于检索到的上下文生成答案。支持本地视觉模型接地与最近对话历史。"""
     client, model, messages = _prepare_generation(
         query, contexts, backend=backend, vision_model=vision_model,
         base_url=base_url, llm_model=llm_model, history=history, grounded=grounded,
+        system_prompt_override=system_prompt_override,
     )
     response = client.chat.completions.create(
         model=model, messages=messages, temperature=LLM_TEMPERATURE, max_tokens=1024,
@@ -377,6 +397,25 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
 
     answer = generate_answer(query, contexts, backend=backend, vision_model=vision_model,
                              history=history, grounded=grounded)
+
+    # 4.6 CRAG 生成后自检（docs 第五章）：答案是否真的基于上下文？
+    # 低于阈值用严格 prompt 重试一次、取分高者。失败即放行（verify_answer 失败
+    # 返回 5）——自检是提质手段，绝不能变成阻断回答的新故障点。
+    # 流式路径无法撤回已输出的答案，只在缓存前把关（见 stream_rag_query.gen()）。
+    if ANSWER_VERIFY_ENABLED and contexts:
+        first_score = verify_answer(answer, [c["content"] for c in contexts])
+        if first_score < ANSWER_VERIFY_THRESHOLD:
+            strict_answer = generate_answer(
+                query, contexts, backend=backend, vision_model=vision_model,
+                history=history, grounded=True,
+                system_prompt_override=STRICT_ANSWER_SYSTEM_PROMPT,
+            )
+            strict_score = verify_answer(strict_answer, [c["content"] for c in contexts])
+            kept = "重试版" if strict_score > first_score else "初版"
+            if strict_score > first_score:
+                answer = strict_answer
+            print(f"[AnswerVerifier] 初版 {first_score}/5 低于阈值 {ANSWER_VERIFY_THRESHOLD}，"
+                  f"严格重试 {strict_score}/5，采用{kept}", file=sys.stderr, flush=True)
 
     # 5. 整理引用来源：按文档去重 + 附命中原文（用户展开即可核实，见 src/citations.py）
     sources = citations.unique_sources(contexts)
@@ -499,7 +538,17 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             yield chunk
             full_answer += chunk
         # 无历史才缓存：带历史的追问是个性化的，命中率低且易错配
-        if not history and full_answer:
+        # CRAG 自检（流式侧）：答案已实时输出、无法撤回，但**不达标的不写缓存**——
+        # 缓存命中会跳过检索与验证直接复用，把关放在这里等于把一次没编好的
+        # 答案挡在「变成常态」之外。非流式路径在 rag_query 里带重试。
+        cacheable = not history and full_answer
+        if cacheable and ANSWER_VERIFY_ENABLED and contexts:
+            verify_score = verify_answer(full_answer, [c["content"] for c in contexts])
+            if verify_score < ANSWER_VERIFY_THRESHOLD:
+                print(f"[AnswerVerifier] 流式答案验证 {verify_score}/5 低于阈值，"
+                      f"跳过缓存", file=sys.stderr, flush=True)
+                cacheable = False
+        if cacheable:
             try:
                 cache_answer(kb_id, query, full_answer, sources)
             except Exception:

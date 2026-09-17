@@ -175,6 +175,15 @@ CONTEXTUAL_DOCUMENT_MAX_CHARS = int(os.getenv("CONTEXTUAL_DOCUMENT_MAX_CHARS", "
 QUERY_EXPANSION_ENABLED = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
 QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))  # 含原始 query 在内的总查询数
 
+# --- CRAG 生成后自检（默认关）---
+# 原理：答案生成后让模型判断「答案是否真的基于上下文」（1-5 分），
+# 低于阈值就用更严格的 prompt 重试一次（重试后取分高者）。
+# 与 answer_gate 的分工：门控管进门（检索质量不够不喂模型），自检管出门
+# （答案已生成，回头查它有没有编）。失败即放行——验证器挂了不能阻断回答。
+# 成本：每问多一次 max_tokens=5 的打分调用；低于阈值才额外付一次完整重试生成。
+ANSWER_VERIFY_ENABLED = os.getenv("ANSWER_VERIFY_ENABLED", "false").lower() == "true"
+ANSWER_VERIFY_THRESHOLD = int(os.getenv("ANSWER_VERIFY_THRESHOLD", "3"))  # 低于该分触发严格重试
+
 # --- 语义缓存（RAG 问答路径）---
 # 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。
 # 失效：知识库文档变化时清空该库缓存（见 vector_store 的 clear_kb_cache 钩子）。
