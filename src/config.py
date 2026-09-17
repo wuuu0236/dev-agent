@@ -184,6 +184,16 @@ QUERY_EXPANSION_COUNT = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))  # 含原�
 ANSWER_VERIFY_ENABLED = os.getenv("ANSWER_VERIFY_ENABLED", "false").lower() == "true"
 ANSWER_VERIFY_THRESHOLD = int(os.getenv("ANSWER_VERIFY_THRESHOLD", "3"))  # 低于该分触发严格重试
 
+# --- Adaptive Routing 查询路由（检索前分流，默认关）---
+# 原理：检索之前判断问题类型——chitchat 闲聊不走 RAG（省下整条检索链路）/
+# simple 正常检索 / multi-hop 拆成子问题联合检索（复用 search_multi，精排一次）。
+# 三层结构：规则引擎（零成本拦明显闲聊）→ LLM 分类（兜底）→ 多跳分解。
+# 与 answer_gate 分工：路由管「要不要检索」，门控管「检索结果配不配回答」，
+# 互不替代——门控仍是检索后的最后防线。
+# 成本：规则命中零成本；未命中时每问多一次 max_tokens=10 的分类调用；
+# multi-hop 额外付一次分解调用 + 多路粗排。失败一律按 simple 降级。
+ADAPTIVE_ROUTING_ENABLED = os.getenv("ADAPTIVE_ROUTING_ENABLED", "false").lower() == "true"
+
 # --- 语义缓存（RAG 问答路径）---
 # 原理：问题转向量，与缓存问题算余弦相似度，超过阈值命中则秒回、不调模型。
 # 失效：知识库文档变化时清空该库缓存（见 vector_store 的 clear_kb_cache 钩子）。

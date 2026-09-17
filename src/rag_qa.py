@@ -45,6 +45,8 @@ from src.config import (
     RAG_HISTORY_TURNS, DIRECT_RETURN_ENABLED, DIRECT_RETURN_THRESHOLD,
     ANSWER_VERIFY_ENABLED, ANSWER_VERIFY_THRESHOLD,
 )
+# 查询路由：检索前判断 chitchat / simple / multi-hop（关闭时恒 simple，零成本）
+from src.query_router import classify_query, decompose_query
 # 生产检索器：基于 Chroma + BM25 + RRF，按 kb_id 检索（与已部署版本一致）
 from src.hybrid_retriever import HybridRetriever
 # 查询改写：多轮追问先消解指代再检索（无历史时零成本原样返回）
@@ -183,6 +185,21 @@ def _retrieve_contexts(kb_id: str, retrieval_query: str, top_k: int) -> list[dic
     if len(expanded) <= 1:
         return retriever.search(retrieval_query, top_k=top_k)
     return retriever.search_multi(expanded, top_k=top_k)
+
+
+def _retrieve_multi_hop(kb_id: str, retrieval_query: str, top_k: int) -> list[dict]:
+    """多跳检索（docs 第七章）：拆成子问题后联合检索，精排仍只做一次。
+
+    原始问题打头当主查询（search_multi 用 queries[0] 做精排打分）——
+    最终要回答的是原问题，子问题只负责把各段事实召回。
+    分解失败 / LLM 判定其实不是多跳（分解结果与原问题相同）时退回
+    普通单查询路径，行为与路由不存在时一致。
+    """
+    retriever = HybridRetriever(kb_id)
+    sub_queries = [q for q in decompose_query(retrieval_query) if q != retrieval_query]
+    if not sub_queries:
+        return retriever.search(retrieval_query, top_k=top_k)
+    return retriever.search_multi([retrieval_query] + sub_queries, top_k=top_k)
 
 
 def _vision_ground(query: str, image_paths: list[str], vision_model: str, base_url: str) -> str:
@@ -346,39 +363,56 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # 1. 追问消解：历史 + 当前问题 → 自包含的检索 query（无历史 / 失败则原样返回）
     retrieval_query = rewrite_query(query, history)
 
-    # 2. 检索（查询扩展开启时多角度召回，精排仍只做一次；关闭时行为不变）
-    contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
+    # 1.5 自适应路由（docs 第七章）：检索前判断 chitchat / simple / multi-hop。
+    # 关闭或分类失败时 classify_query 返回 "simple"，行为与路由不存在时完全一致。
+    query_type = classify_query(retrieval_query)
 
-    if not contexts:
-        answer = "知识库中没有找到相关内容，请先上传文档。"
-        # gate_score 记 0.0 而非 None：None 表示"压根没检索"（缓存命中），
-        # 这里确实检索了、只是一条都没搜到（典型是空库），两者不是一回事。
-        log_id = _log_answer(
-            kb_id=kb_id, question=query, retrieval_query=retrieval_query,
-            answer=answer, grounded=False, gate_score=0.0,
-            backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
-        )
-        return {
-            "answer": answer,
-            "sources": [],
-            "contexts": [],
-            "grounded": False,
-            "query": query,
-            "retrieval_query": retrieval_query,
-            "log_id": log_id,
-        }
-
-    # 3. 门控：检索结果分数过低 → 清空上下文，如实说没找到（防幻觉，见 answer_gate）
-    # ⚠️ 快照必须在清空之前抓（反馈环 P0 的硬约束）：contexts = [] 之后，门控分数
-    # 就再也拿不到了——事后无法区分"0.28 差一点"和"0.02 库里根本没有"，而这两个数
-    # 指向完全相反的下一步动作。回归测试见 tests/test_answer_log.py。
-    gate_score = top_score(contexts)
-    ground_hits = answer_log.snapshot_hits(contexts)
-    grounded = is_grounded(contexts)
-    if not grounded:
-        print(f"[AnswerGate] 检索最高分 {top_score(contexts):.4f} 低于阈值，"
-              f"转为无知识库支撑回答", file=sys.stderr, flush=True)
+    if query_type == "chitchat":
+        # 闲聊分流：**不检索**——省下 embedding + BM25 + 精排 API 整条链路。
+        # 刻意**不走**下方「检索为空」的提前返回：NO_CONTEXT 提示词允许寒暄
+        # 正常回应（拒答 ≠ 拒绝服务）。gate_score 记 None（answer_log 语义：
+        # "没检索"），不与"检索了没捞到"（0.0）混在一起。
         contexts = []
+        gate_score = None
+        ground_hits = []
+        grounded = False
+    else:
+        # 2. 检索（查询扩展开启时多角度召回，精排仍只做一次；关闭时行为不变）
+        if query_type == "multi-hop":
+            contexts = _retrieve_multi_hop(kb_id, retrieval_query, top_k)
+        else:
+            contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
+
+        if not contexts:
+            answer = "知识库中没有找到相关内容，请先上传文档。"
+            # gate_score 记 0.0 而非 None：None 表示"压根没检索"（缓存命中），
+            # 这里确实检索了、只是一条都没搜到（典型是空库），两者不是一回事。
+            log_id = _log_answer(
+                kb_id=kb_id, question=query, retrieval_query=retrieval_query,
+                answer=answer, grounded=False, gate_score=0.0,
+                backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
+            )
+            return {
+                "answer": answer,
+                "sources": [],
+                "contexts": [],
+                "grounded": False,
+                "query": query,
+                "retrieval_query": retrieval_query,
+                "log_id": log_id,
+            }
+
+        # 3. 门控：检索结果分数过低 → 清空上下文，如实说没找到（防幻觉，见 answer_gate）
+        # ⚠️ 快照必须在清空之前抓（反馈环 P0 的硬约束）：contexts = [] 之后，门控分数
+        # 就再也拿不到了——事后无法区分"0.28 差一点"和"0.02 库里根本没有"，而这两个数
+        # 指向完全相反的下一步动作。回归测试见 tests/test_answer_log.py。
+        gate_score = top_score(contexts)
+        ground_hits = answer_log.snapshot_hits(contexts)
+        grounded = is_grounded(contexts)
+        if not grounded:
+            print(f"[AnswerGate] 检索最高分 {top_score(contexts):.4f} 低于阈值，"
+                  f"转为无知识库支撑回答", file=sys.stderr, flush=True)
+            contexts = []
 
     # 4. 生成（带最近对话历史，多轮追问有上下文）
     # 4.5 高相似直接返回：分数高到几乎逐字命中时跳过 LLM，原文即答案（零幻觉 + 省一次调用）。
@@ -483,29 +517,44 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # 注意只作用于检索——生成阶段仍用用户原话，历史另由 _prepare_generation 注入。
     retrieval_query = rewrite_query(query, history)
 
-    contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
+    # 自适应路由（docs 第七章，同 rag_query）：chitchat 不检索 / multi-hop 拆解 /
+    # simple 正常。关闭或分类失败时恒 simple，行为与路由不存在时完全一致。
+    query_type = classify_query(retrieval_query)
 
-    if not contexts:
-        fallback = "知识库中没有找到相关内容，请先上传文档。"
-        log_ref["gate_score"] = 0.0
-        log_ref["id"] = _log_answer(
-            kb_id=kb_id, question=query, retrieval_query=retrieval_query,
-            answer=fallback, grounded=False, gate_score=0.0,
-            backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
-        )
-        return iter([fallback]), [], [], retrieval_query, log_ref
-
-    # 门控：检索结果分数过低 → 清空上下文。既不喂给模型（防幻觉），也不作为
-    # 引用来源展示（没有依据就没有引用）。前端据 contexts 为空显示"未命中"提示。
-    # ⚠️ 快照必须在清空之前抓（反馈环 P0 的硬约束，同 rag_query）。
-    gate_score = top_score(contexts)
-    ground_hits = answer_log.snapshot_hits(contexts)
-    grounded = is_grounded(contexts)
-    log_ref["gate_score"] = gate_score
-    if not grounded:
-        print(f"[AnswerGate] 检索最高分 {top_score(contexts):.4f} 低于阈值，"
-              f"转为无知识库支撑回答", file=sys.stderr, flush=True)
+    if query_type == "chitchat":
+        # 闲聊分流：不检索（gate_score 保持 None = answer_log 语义"没检索"）。
+        # 不走「检索为空」的固定话术提前返回——寒暄由 NO_CONTEXT 提示词正常回应。
         contexts = []
+        gate_score = None  # gen() 里 _log_answer 要引用；不赋值是 NameError
+        ground_hits = []
+        grounded = False
+    else:
+        if query_type == "multi-hop":
+            contexts = _retrieve_multi_hop(kb_id, retrieval_query, top_k)
+        else:
+            contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
+
+        if not contexts:
+            fallback = "知识库中没有找到相关内容，请先上传文档。"
+            log_ref["gate_score"] = 0.0
+            log_ref["id"] = _log_answer(
+                kb_id=kb_id, question=query, retrieval_query=retrieval_query,
+                answer=fallback, grounded=False, gate_score=0.0,
+                backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
+            )
+            return iter([fallback]), [], [], retrieval_query, log_ref
+
+        # 门控：检索结果分数过低 → 清空上下文。既不喂给模型（防幻觉），也不作为
+        # 引用来源展示（没有依据就没有引用）。前端据 contexts 为空显示"未命中"提示。
+        # ⚠️ 快照必须在清空之前抓（反馈环 P0 的硬约束，同 rag_query）。
+        gate_score = top_score(contexts)
+        ground_hits = answer_log.snapshot_hits(contexts)
+        grounded = is_grounded(contexts)
+        log_ref["gate_score"] = gate_score
+        if not grounded:
+            print(f"[AnswerGate] 检索最高分 {top_score(contexts):.4f} 低于阈值，"
+                  f"转为无知识库支撑回答", file=sys.stderr, flush=True)
+            contexts = []
 
     # 整理引用来源（与 rag_query 同一套逻辑，已收口到 src/citations.py）
     sources = citations.unique_sources(contexts)
