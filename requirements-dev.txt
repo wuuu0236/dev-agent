@@ -38,6 +38,13 @@ python-docx>=1.0.0
 # src.auth 间接收集到），缺了 CI 收集阶段就 ImportError。
 bcrypt>=4.0
 PyJWT>=2.8
+# fastapi：tests/test_auth.py / test_content_dedup.py 经 src.api.web_api 收集到
+# （2026-09-17 多用户模块起，API 层测试进 tests/），web_api 模块级定义路由必依赖它。
+# python-multipart：web_api 定义 UploadFile 上传路由时**导入即校验**，缺了
+# RuntimeError 不是等到运行时——与 requirements.txt 里同一条注释同一件事。
+fastapi>=0.100.0
+python-multipart>=0.0.9
+# httpx 是 TestClient 的运行依赖，由 chromadb 传递安装，不重复声明。
 # 静态检查：只报「未定义名 / 未使用导入 / 重复定义」，不带风格规则噪音。
 # 引入它是因为一个真实事故：`_get_ollama_client` 里把 `OpenAI` 写成了不存在的
 # `OpenAIClient`，云端路径完全正常、只有选 ollama 时才 NameError —— 于是被宣传的
