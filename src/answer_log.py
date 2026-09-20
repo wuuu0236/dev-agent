@@ -94,11 +94,18 @@ def _init_table():
         "    comment         TEXT,               -- P1：用户补充说明\n"
         "    rated_at        TEXT,               -- P1\n"
         "    resolved        TEXT DEFAULT 'none',-- P2：none/ignored/cache_purged/kb_patched/case_added\n"
+        "    pipeline_reason TEXT DEFAULT '',    -- 执行计划归因（第八章）：chitchat_minimal 等\n"
         "    created_at      TEXT    NOT NULL\n"
         ")"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_answer_log_kb ON " + _TABLE + "(kb_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_answer_log_rating ON " + _TABLE + "(rating)")
+    # 老库迁移：pipeline_reason 是第八章（Query Execution Plan）新增的列。
+    # 用 database._migrate_add_column 的同款 PRAGMA 检查（不走它本体：表由本模块
+    # 惰性建，init_db 阶段 answer_log 可能还不存在，在那里迁移会对空表 ALTER 报错）。
+    existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({_TABLE})")}
+    if "pipeline_reason" not in existing:
+        conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN pipeline_reason TEXT DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -134,13 +141,18 @@ def log_answer(kb_id: str, question: str, answer: str, *,
                gate_score: float | None = None,
                hit_cache: bool = False,
                backend: str | None = None,
-               hits: list[dict] | str | None = None) -> int | None:
+               hits: list[dict] | str | None = None,
+               pipeline_reason: str | None = None) -> int | None:
     """写入一条问答快照，返回新行 id；关闭或失败时返回 None。
 
     三条自我约束（见模块 docstring）：旁路失败不抛、不重复检索、淘汰保护信号。
 
     `gate_score` 与 `hit_cache` 的语义边界要说清：缓存命中时**根本没检索**，
     所以 gate_score 是 NULL 而不是 0 —— 0 会被误读成"检索了但一分没得"。
+
+    `pipeline_reason`：执行计划的归因标签（docs 第八章），评估面板据此按管线
+    类型（chitchat_minimal / simple_expanded / simple_verified / simple_lean /
+    multi_hop_full）筛选对比。
     """
     if not ANSWER_LOG_ENABLED:
         return None
@@ -151,12 +163,13 @@ def log_answer(kb_id: str, question: str, answer: str, *,
         conn = _connect()
         cur = conn.execute(
             "INSERT INTO " + _TABLE + " (kb_id, question, retrieval_query, answer, grounded,"
-            " gate_score, hit_cache, backend, hits, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " gate_score, hit_cache, backend, hits, pipeline_reason, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 kb_id, question, retrieval_query or question, answer or "",
                 1 if grounded else 0,
                 gate_score, 1 if hit_cache else 0, backend, hits,
+                pipeline_reason or "",
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )

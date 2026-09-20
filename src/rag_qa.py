@@ -44,7 +44,7 @@ from src.config import (
     LLM_BACKEND, OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_VISION_MODEL,
     RAG_HISTORY_TURNS, DIRECT_RETURN_ENABLED, DIRECT_RETURN_THRESHOLD,
     ANSWER_VERIFY_ENABLED, ANSWER_VERIFY_THRESHOLD,
-    CONTEXT_EXPANSION_ENABLED,
+    CONTEXT_EXPANSION_ENABLED, QUERY_EXPANSION_ENABLED,
 )
 # 查询路由：检索前判断 chitchat / simple / multi-hop（关闭时恒 simple，零成本）
 from src.query_router import classify_query, decompose_query
@@ -56,6 +56,8 @@ from src.hybrid_retriever import HybridRetriever
 from src.query_rewrite import rewrite_query
 # 查询扩展：单一表述召不全时多角度各召回一路再融合（关闭/失败时退回单查询）
 from src.query_expand import expand_query
+# 执行计划管线（docs 第八章）：路由结果解析成 PipelinePlan，后续步骤只看计划
+from src.pipeline import resolve_plan
 # CRAG 生成后自检：验证答案是否真的基于上下文，不达标触发严格重试（失败即放行）
 from src.answer_verifier import verify_answer
 # 检索质量门控：精排分数低于阈值时不注入上下文，如实说"不知道"（防幻觉）
@@ -96,6 +98,23 @@ def _get_ollama_client(base_url: str) -> OpenAI:
             api_key="ollama", base_url=base_url, timeout=120.0
         )
     return _ollama_clients[base_url]
+
+
+def _resolve_plan(query_type: str):
+    """路由结果 → 执行计划（docs 第八章）。
+
+    把**本模块命名空间**的全局开关传给 resolve_plan——而非让它自己去读 config。
+    原因：测试通过 `monkeypatch.setattr(rag_qa, "XXX_ENABLED", ...)` 控制开关
+    （见 test_direct_return / test_answer_verifier），patch 只作用于本模块的
+    名字；resolve_plan 若绕过这里直接读 config，patch 就会静默失效。
+    """
+    return resolve_plan(
+        query_type,
+        expansion_enabled=QUERY_EXPANSION_ENABLED,
+        verify_enabled=ANSWER_VERIFY_ENABLED,
+        context_expansion_enabled=CONTEXT_EXPANSION_ENABLED,
+        direct_return_enabled=DIRECT_RETURN_ENABLED,
+    )
 
 
 def _log_answer(**kw) -> int | None:
@@ -175,8 +194,13 @@ def _direct_return_answer(contexts: list[dict]) -> str | None:
     return f"知识库中有与问题高度匹配的内容{where}，原文如下：\n\n[1] {best['content']}"
 
 
-def _retrieve_contexts(kb_id: str, retrieval_query: str, top_k: int) -> list[dict]:
+def _retrieve_contexts(kb_id: str, retrieval_query: str, top_k: int,
+                       use_expansion: bool = True) -> list[dict]:
     """检索收口：查询扩展开启时多角度联合检索，否则单查询（两条问答路径共用）。
+
+    use_expansion 由执行计划传入（plan.use_expansion，docs 第八章）——不是函数
+    自己读全局开关。expand_query 内部的开关判断保留作纵深防御（plan 说该扩展、
+    全局开关却是关的，矛盾时以关为准），正常情况下两者一致。
 
     expand_query 关闭 / 失败时返回 [retrieval_query] 单元素列表 → 走 search()，
     行为与扩展开关不存在时完全一致；扩展成功时走 search_multi()，
@@ -184,6 +208,8 @@ def _retrieve_contexts(kb_id: str, retrieval_query: str, top_k: int) -> list[dic
     展示用的改写问句仍是 rewrite_query 的单个结果，与扩展无关。
     """
     retriever = HybridRetriever(kb_id)
+    if not use_expansion:
+        return retriever.search(retrieval_query, top_k=top_k)
     expanded = expand_query(retrieval_query)
     if len(expanded) <= 1:
         return retriever.search(retrieval_query, top_k=top_k)
@@ -370,6 +396,10 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # 关闭或分类失败时 classify_query 返回 "simple"，行为与路由不存在时完全一致。
     query_type = classify_query(retrieval_query)
 
+    # 1.6 执行计划（docs 第八章）：路由结果解析成 PipelinePlan，后续所有步骤的
+    # "该不该跑"只看 plan，不再各自读全局开关（互斥规则收口在 resolve_plan 里）。
+    plan = _resolve_plan(query_type)
+
     if query_type == "chitchat":
         # 闲聊分流：**不检索**——省下 embedding + BM25 + 精排 API 整条链路。
         # 刻意**不走**下方「检索为空」的提前返回：NO_CONTEXT 提示词允许寒暄
@@ -384,7 +414,8 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
         if query_type == "multi-hop":
             contexts = _retrieve_multi_hop(kb_id, retrieval_query, top_k)
         else:
-            contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
+            contexts = _retrieve_contexts(kb_id, retrieval_query, top_k,
+                                          use_expansion=plan.use_expansion)
 
         if not contexts:
             answer = "知识库中没有找到相关内容，请先上传文档。"
@@ -394,6 +425,7 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                 kb_id=kb_id, question=query, retrieval_query=retrieval_query,
                 answer=answer, grounded=False, gate_score=0.0,
                 backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
+                pipeline_reason=plan.reason,
             )
             return {
                 "answer": answer,
@@ -417,29 +449,43 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                   f"转为无知识库支撑回答", file=sys.stderr, flush=True)
             contexts = []
 
-    # 4. 生成（带最近对话历史，多轮追问有上下文）
     # 4.5 高相似直接返回：分数高到几乎逐字命中时跳过 LLM，原文即答案（零幻觉 + 省一次调用）。
+    # 跑不跑由 plan.use_direct_return 决定（docs 第八章）；函数内部的开关判断保留作
+    # 纵深防御（已有测试 patch rag_qa.DIRECT_RETURN_ENABLED 的方式不受影响）。
     # 返回值结构与常规路径完全一致（文档红线），backend 记 "direct_return" 供日志归因。
-    direct = _direct_return_answer(contexts)
+    # 必须在 Parent-Child 扩展**之前**：直接返回看到的是精排命中的原始 chunk 和
+    # 原始分数，"原文如下"不该掺进邻域噪声。
+    direct = _direct_return_answer(contexts) if plan.use_direct_return else None
     if direct:
         sources = citations.unique_sources(contexts)
         log_id = _log_answer(
             kb_id=kb_id, question=query, retrieval_query=retrieval_query, answer=direct,
             grounded=True, gate_score=gate_score, backend="direct_return",
-            hits=ground_hits,
+            hits=ground_hits, pipeline_reason=plan.reason,
         )
         return {"answer": direct, "sources": sources, "contexts": contexts,
                 "grounded": True, "query": query, "retrieval_query": retrieval_query,
                 "log_id": log_id}
 
+    # 4.6 Parent-Child 邻域扩展（docs 第三章）：检索用小块、生成用大块。
+    # 位置是执行计划的自然结果：plan.use_parent_child 的唯一执行点就在
+    # generate_answer() 之前——与流式路径完全一致（此前非流式在 verify 之后才扩展，
+    # CRAG 验证的是小块，是个时机 bug）。命中原文已存 original_content，
+    # 引用展示不受影响（citations 优先取它）。
+    if plan.use_parent_child and contexts:
+        contexts = expand_contexts(contexts, kb_id)
+
+    # 4.7 生成（带最近对话历史，多轮追问有上下文；LLM 拿到的是扩展后的大块）
     answer = generate_answer(query, contexts, backend=backend, vision_model=vision_model,
                              history=history, grounded=grounded)
 
-    # 4.6 CRAG 生成后自检（docs 第五章）：答案是否真的基于上下文？
-    # 低于阈值用严格 prompt 重试一次、取分高者。失败即放行（verify_answer 失败
-    # 返回 5）——自检是提质手段，绝不能变成阻断回答的新故障点。
+    # 4.8 CRAG 生成后自检（docs 第五章）：答案是否真的基于上下文？
+    # 跑不跑由 plan.use_crag 决定（simple 下与扩展互斥，互斥规则收口在 resolve_plan）。
+    # 验证对象是扩展后的大块——与流式路径同一口径：验证的是"答案是否基于
+    # 给模型的上下文"。低于阈值用严格 prompt 重试一次、取分高者。失败即放行
+    # （verify_answer 失败返回 5）——自检是提质手段，绝不能变成阻断回答的新故障点。
     # 流式路径无法撤回已输出的答案，只在缓存前把关（见 stream_rag_query.gen()）。
-    if ANSWER_VERIFY_ENABLED and contexts:
+    if plan.use_crag and contexts:
         first_score = verify_answer(answer, [c["content"] for c in contexts])
         if first_score < ANSWER_VERIFY_THRESHOLD:
             strict_answer = generate_answer(
@@ -454,13 +500,6 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
             print(f"[AnswerVerifier] 初版 {first_score}/5 低于阈值 {ANSWER_VERIFY_THRESHOLD}，"
                   f"严格重试 {strict_score}/5，采用{kept}", file=sys.stderr, flush=True)
 
-    # 4.7 Parent-Child 邻域扩展（docs 第三章）：检索用小块、生成用大块。
-    # 放在门控/直接返回**之后**——两者看到的都是精排命中的原始 chunk
-    # （直接返回的"原文如下"不该掺进邻域噪声）。命中原文已存 original_content，
-    # 引用展示不受影响（citations 优先取它）。
-    if CONTEXT_EXPANSION_ENABLED and contexts:
-        contexts = expand_contexts(contexts, kb_id)
-
     # 5. 整理引用来源：按文档去重 + 附命中原文（用户展开即可核实，见 src/citations.py）
     sources = citations.unique_sources(contexts)
 
@@ -468,7 +507,7 @@ def rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     log_id = _log_answer(
         kb_id=kb_id, question=query, retrieval_query=retrieval_query, answer=answer,
         grounded=grounded, gate_score=gate_score, backend=backend or LLM_BACKEND,
-        hits=ground_hits,
+        hits=ground_hits, pipeline_reason=plan.reason,
     )
 
     # contexts 一并返回：评估面板复用它做 LLM Judge，避免二次检索。
@@ -531,6 +570,9 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     # simple 正常。关闭或分类失败时恒 simple，行为与路由不存在时完全一致。
     query_type = classify_query(retrieval_query)
 
+    # 执行计划（docs 第八章，同 rag_query）：后续步骤只看 plan。
+    plan = _resolve_plan(query_type)
+
     if query_type == "chitchat":
         # 闲聊分流：不检索（gate_score 保持 None = answer_log 语义"没检索"）。
         # 不走「检索为空」的固定话术提前返回——寒暄由 NO_CONTEXT 提示词正常回应。
@@ -542,7 +584,8 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
         if query_type == "multi-hop":
             contexts = _retrieve_multi_hop(kb_id, retrieval_query, top_k)
         else:
-            contexts = _retrieve_contexts(kb_id, retrieval_query, top_k)
+            contexts = _retrieve_contexts(kb_id, retrieval_query, top_k,
+                                          use_expansion=plan.use_expansion)
 
         if not contexts:
             fallback = "知识库中没有找到相关内容，请先上传文档。"
@@ -551,6 +594,7 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                 kb_id=kb_id, question=query, retrieval_query=retrieval_query,
                 answer=fallback, grounded=False, gate_score=0.0,
                 backend=backend or LLM_BACKEND, hits=answer_log.snapshot_hits([]),
+                pipeline_reason=plan.reason,
             )
             return iter([fallback]), [], [], retrieval_query, log_ref
 
@@ -570,13 +614,14 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
     sources = citations.unique_sources(contexts)
 
     # 高相似直接返回：分数高到几乎逐字命中时跳过 LLM，原文即答案。
+    # 跑不跑由 plan.use_direct_return 决定（同 rag_query，docs 第八章）。
     # 返回结构与常规路径一致（5 元组）；与缓存命中分支同款"一次性 yield"。
-    direct = _direct_return_answer(contexts)
+    direct = _direct_return_answer(contexts) if plan.use_direct_return else None
     if direct:
         log_ref["id"] = _log_answer(
             kb_id=kb_id, question=query, retrieval_query=retrieval_query,
             answer=direct, grounded=True, gate_score=gate_score,
-            backend="direct_return", hits=ground_hits,
+            backend="direct_return", hits=ground_hits, pipeline_reason=plan.reason,
         )
         # 无历史才缓存（与常规路径同一规则）：direct 答案是确定性的，缓存绝对安全
         if not history:
@@ -590,11 +635,12 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
 
         return gen_direct(), sources, contexts, retrieval_query, log_ref
 
-    # Parent-Child 邻域扩展（docs 第三章，同 rag_query）：放在门控/直接返回之后、
-    # 生成之前。命中原文已存 original_content，引用展示不受影响。
+    # Parent-Child 邻域扩展（docs 第三章，同 rag_query）：跑不跑由
+    # plan.use_parent_child 决定，唯一执行点在生成之前——两条路径因此天然一致。
+    # 命中原文已存 original_content，引用展示不受影响。
     # ⚠️ CRAG 流式自检（gen 内）用的 contexts 也会是扩展后的——验证的是
     # "答案是否基于给模型的上下文"，用扩展后的文本口径才对。
-    if CONTEXT_EXPANSION_ENABLED and contexts:
+    if plan.use_parent_child and contexts:
         contexts = expand_contexts(contexts, kb_id)
 
     def gen():
@@ -608,7 +654,7 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
         # 缓存命中会跳过检索与验证直接复用，把关放在这里等于把一次没编好的
         # 答案挡在「变成常态」之外。非流式路径在 rag_query 里带重试。
         cacheable = not history and full_answer
-        if cacheable and ANSWER_VERIFY_ENABLED and contexts:
+        if cacheable and plan.use_crag and contexts:
             verify_score = verify_answer(full_answer, [c["content"] for c in contexts])
             if verify_score < ANSWER_VERIFY_THRESHOLD:
                 print(f"[AnswerVerifier] 流式答案验证 {verify_score}/5 低于阈值，"
@@ -628,6 +674,7 @@ def stream_rag_query(kb_id: str, query: str, top_k: int = TOP_K_RETRIEVE,
                 kb_id=kb_id, question=query, retrieval_query=retrieval_query,
                 answer=full_answer, grounded=grounded, gate_score=gate_score,
                 backend=backend or LLM_BACKEND, hits=ground_hits,
+                pipeline_reason=plan.reason,
             )
 
     return gen(), sources, contexts, retrieval_query, log_ref

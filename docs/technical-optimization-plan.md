@@ -18,6 +18,7 @@
 6. 每个新模块都必须能在没有 API key 的环境下被 import 而不报错。
 7. 不在模块顶层直接创建 OpenAI 客户端，必须用惰性单例。
 8. 不在 `src/` 目录下新增文件时使用绝对导入以外的路径写法，统一 `from src.xxx import ...`。
+9. 后续所有模块的"该不该跑"由 `resolve_plan()` 统一决策（见第八章），模块内部不再各自读全局开关。
 
 ### 新增配置统一放 `src/config.py`
 
@@ -536,15 +537,18 @@ CONTEXT_EXPAND_MAX_CHARS = int(os.getenv("CONTEXT_EXPAND_MAX_CHARS", "2000"))
 
 ### 3.5 接入点
 
-在 `src/rag_qa.py` 中精排返回 top-k 后拼上下文给 LLM 之前：
+在 `src/rag_qa.py` 中精排返回 top-k 后拼上下文给 LLM 之前（跑不跑由执行计划决定，见第八章）：
 
 ```python
-if CONTEXT_EXPANSION_ENABLED:
+if plan.use_parent_child and contexts:
     from src.context_expander import expand_contexts
     contexts = expand_contexts(contexts, kb_id)
 ```
 
-注意：引用来源的 snippets 应该显示精排命中的原始 chunk 内容不是合并后的长文本。所以在扩展前先把原始片段存下来。
+注意：
+- 必须在 `generate_answer()` **之前**——否则 LLM 看到的还是小块，扩展只影响返回的 contexts，非流式和流式路径行为不一致。
+- 必须在直接返回**之后**——直接返回看到的是原始精排分数和原始 chunk，不该掺进邻域噪声。
+- 引用显示原始 chunk（`original_content`），不是合并后的长文本。
 
 ### 3.6 测试
 
@@ -614,6 +618,8 @@ def expand_query(query: str) -> list[str]:
 ```
 
 ### 4.3 检索流程变更
+
+扩展开关的判断由执行计划接管（见第八章）：`_retrieve_contexts()` 接收 `use_expansion=plan.use_expansion`，为 false 时直接走单查询 `search()`，不再调用 `expand_query()`。
 
 在 `src/rag_qa.py` 的检索阶段改为：
 
@@ -715,10 +721,10 @@ def verify_answer(answer: str, contexts: list[str]) -> int:
 
 ### 5.3 接入点
 
-在 `src/rag_qa.py` 的生成函数中 LLM 返回答案后：
+在 `src/rag_qa.py` 的生成函数中 LLM 返回答案后（跑不跑由执行计划决定，见第八章；simple 下与查询扩展互斥，互斥规则收口在 `resolve_plan()`）：
 
 ```python
-if ANSWER_VERIFY_ENABLED and contexts:
+if plan.use_crag and contexts:
     from src.answer_verifier import verify_answer
     score = verify_answer(answer, [c["content"] for c in contexts])
     if score < ANSWER_VERIFY_THRESHOLD:
@@ -909,7 +915,134 @@ ADAPTIVE_ROUTING_ENABLED = os.getenv("ADAPTIVE_ROUTING_ENABLED", "false").lower(
 
 ---
 
-## 八、内容去重
+## 八、Query Execution Plan（执行计划管线）
+
+### 8.1 问题
+
+每个模块独立读全局开关，彼此不知道对方跑没跑、花了多少调用。全部开启时单次提问可能触发 7 次 LLM 调用，且非流式和流式路径的 Parent-Child 扩展时机不一致。
+
+### 8.2 企业做法
+
+路由决策解析出一条执行计划（PipelinePlan），后续所有步骤只看计划，不看独立开关。互斥规则收口在一个函数里。
+
+### 8.3 新建 src/pipeline.py
+
+```python
+from dataclasses import dataclass
+from src.config import (
+    QUERY_EXPANSION_ENABLED,
+    CONTEXT_EXPANSION_ENABLED,
+    ANSWER_VERIFY_ENABLED,
+    DIRECT_RETURN_ENABLED,
+)
+
+@dataclass(frozen=True)
+class PipelinePlan:
+    use_expansion: bool
+    use_parent_child: bool
+    use_crag: bool
+    use_direct_return: bool
+    reason: str          # 日志归因用
+    est_llm_calls: int   # 预估 LLM 调用次数（观测用）
+
+def resolve_plan(query_type: str) -> PipelinePlan:
+    """路由结果 → 执行计划。纯函数，可单测。"""
+    if query_type == "chitchat":
+        return PipelinePlan(
+            use_expansion=False, use_parent_child=False,
+            use_crag=False, use_direct_return=False,
+            reason="chitchat_minimal", est_llm_calls=0,
+        )
+
+    if query_type == "multi-hop":
+        return PipelinePlan(
+            use_expansion=False,       # 多跳自己拆子问题，不再扩展
+            use_parent_child=CONTEXT_EXPANSION_ENABLED,
+            use_crag=ANSWER_VERIFY_ENABLED,  # 多跳全开验证
+            use_direct_return=DIRECT_RETURN_ENABLED,
+            reason="multi_hop_full",
+            est_llm_calls=2 + int(ANSWER_VERIFY_ENABLED),
+        )
+
+    # simple：扩展和 CRAG 二选一（互斥），都不开也行
+    use_exp = QUERY_EXPANSION_ENABLED
+    use_crag = ANSWER_VERIFY_ENABLED and not use_exp
+    return PipelinePlan(
+        use_expansion=use_exp,
+        use_parent_child=CONTEXT_EXPANSION_ENABLED,
+        use_crag=use_crag,
+        use_direct_return=DIRECT_RETURN_ENABLED,
+        reason="simple_expanded" if use_exp else ("simple_verified" if use_crag else "simple_lean"),
+        est_llm_calls=1 + int(use_exp) + int(use_crag),
+    )
+```
+
+> 实现备注：`resolve_plan()` 的四个开关参数化成了可选参数（不传读 config）。
+> 原因：已有测试通过 `monkeypatch.setattr(rag_qa, "XXX_ENABLED", ...)` 控制开关，
+> patch 只作用于 rag_qa 模块命名空间；rag_qa 通过 `_resolve_plan()` 把自己命名
+> 空间的开关值传进去，patch 照常生效，已有测试零改动。
+
+### 8.4 rag_qa.py 接入
+
+顶部 import 加：
+
+```python
+from src.pipeline import resolve_plan
+```
+
+rag_query() 和 stream_rag_query() 中路由之后：
+
+```python
+query_type = classify_query(retrieval_query)
+plan = resolve_plan(query_type)  # 一次解析，后续全看 plan
+```
+
+后续所有步骤的开关判断改为：
+
+- `if CONTEXT_EXPANSION_ENABLED`  →  `if plan.use_parent_child`
+- `if ANSWER_VERIFY_ENABLED`       →  `if plan.use_crag`
+- `if DIRECT_RETURN_ENABLED`       →  `if plan.use_direct_return`
+- `if QUERY_EXPANSION_ENABLED`     →  `if plan.use_expansion`
+
+### 8.5 流式与非流式对齐
+
+两条路径都调用同一个 resolve_plan()，因此天然一致。Parent-Child 扩展在两条路径中都在 generate_answer() 之前执行。CRAG 在非流式路径带严格重试，在流式路径不达标不写缓存。
+
+### 8.6 日志归因
+
+plan.reason 落进 answer_log.pipeline_reason 字段（新增列），评估面板可按管线类型筛选。
+
+数据库变更：
+
+```python
+_migrate_add_column(conn, "answer_log", "pipeline_reason", "TEXT DEFAULT ''")
+```
+
+> 实现备注：迁移放在 `answer_log._init_table()` 里而不是 `database.init_db()`
+> ——answer_log 表由本模块惰性建表，init_db 阶段它可能还不存在，在那里对
+> 空表 ALTER 会报错。
+
+### 8.7 配置
+
+现有 .env 开关不删。它们作为输入传进 resolve_plan()，用户仍然可以通过环境变量控制每个模块的全局可用性。同一请求内的实际执行由 plan 决定。
+
+### 8.8 测试
+
+新增 `tests/test_pipeline.py`：
+
+1. resolve_plan("chitchat") 全 false reason=chitchat_minimal est_llm_calls=0
+2. resolve_plan("simple") 扩展和 CRAG 互斥（只开一个或都不开）
+3. resolve_plan("simple") 且 QUERY_EXPANSION_ENABLED=true 时 use_crag=False
+4. resolve_plan("multi-hop") 时 use_crag=ANSWER_VERIFY_ENABLED use_expansion=False
+5. 所有路径的 reason 非空
+
+### 8.9 修 bug：非流式扩展时机
+
+rag_query() 中当前的执行顺序是 generate_answer（小块）→ verify（小块）→ expand（大块）。改为与流式对齐：direct_return（原始分数）→ expand → generate（大块）→ verify（大块）。这是 PipelinePlan 落地后的自然结果：plan.use_parent_child 只有一个执行点在 generate_answer() 之前，两条路径自动一致。
+
+---
+
+## 九、内容去重
 
 ### 8.1 现状
 
@@ -968,18 +1101,21 @@ if check_duplicate(kb_id, content_hash):
 
 ---
 
-## 九、实施顺序
+## 十、实施顺序
 
 | 顺序 | 模块 | 依赖 | 风险 | 工作量 |
 |:---:|---|---|:---:|:---:|
 | 1 | 多用户与权限 | 无 | 中 | 大 |
 | 2 | 内容去重 | 权限 | 低 | 小 |
-| 3 | 高相似直接返回 | 无 | 低 | 小 |
-| 4 | Contextual Retrieval | 无 | 低 | 小 |
-| 5 | Multi-Query Expansion | 无 | 低 | 小 |
-| 6 | CRAG | 无 | 低 | 小 |
-| 7 | Adaptive Routing | 无 | 中 | 中 |
-| 8 | Parent-Child Retrieval | 无 | 低 | 中 |
+| 3 | Query Execution Plan | 七 | 中 | 中 |
+| 4 | 高相似直接返回 | Plan | 低 | 小 |
+| 5 | Contextual Retrieval | Plan | 低 | 小 |
+| 6 | Multi-Query Expansion | Plan | 低 | 小 |
+| 7 | CRAG | Plan | 低 | 小 |
+| 8 | Adaptive Routing | 无 | 中 | 中 |
+| 9 | Parent-Child Retrieval | Plan | 低 | 中 |
+
+Plan 提前是因为后续模块的开关判断都依赖它。但 Adaptive Routing 本身必须在 Plan 之前实现（Plan 的输入就是路由结果），所以实际执行顺序是：先做权限和去重，再做路由，然后立刻做 Plan，最后做其余模块。
 
 每个模块单独一个 git commit。出问题时精确回退。
 
@@ -991,7 +1127,7 @@ if check_duplicate(kb_id, content_hash):
 
 ---
 
-## 十、测试文件清单
+## 十一、测试文件清单
 
 | 文件 | 测什么 | 最少用例数 |
 |---|---|:---:|
@@ -1003,5 +1139,6 @@ if check_duplicate(kb_id, content_hash):
 | `tests/test_direct_return.py` | 高相似直接返回 | 3 |
 | `tests/test_query_router.py` | 路由分类多跳分解降级 | 6 |
 | `tests/test_content_dedup.py` | 内容去重 | 2 |
+| `tests/test_pipeline.py` | 执行计划解析互斥归因 | 5 |
 
 所有 mock 用 `unittest.mock.patch` 或 `pytest-mock` 不发真实 API 请求。
