@@ -82,7 +82,7 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 | `/api/kbs/{kb_id}/docs` | GET | 文档列表 + 统计 | `database.list_documents` |
 | `/api/ask` | POST | RAG 问答：question + kb_id + history（最近 6 轮） | `rag_qa.rag_query` 全链路 |
 | `/api/ask/stream` | POST | 同上，答案用 SSE 逐块推送（前端打字机效果） | `rag_qa.stream_rag_query` |
-| `/api/feedback` | POST | 给某条回答打 👍/👎（`rating = 'up' / 'down' / null`） | `answer_log.set_rating` |
+| `/api/feedback` | POST | 给某条回答打 👍/👎（`rating = 'up' / 'down' / null`）。**React 界面未接入**，接口保留供脚本 / 其他前端调用 | `answer_log.set_rating` |
 | `/api/kbs/{kb_id}/upload` | POST | 上传入库（multipart） | `parser.parse_file` → `chunker.chunk_parsed` → `vector_store.add_chunks` |
 | `/api/kbs/{kb_id}/reindex` | POST | 按当前参数重建索引 | `reindex.rebuild_kb` |
 | `/api/docs/{doc_id}` | DELETE | 删文档（SQLite + Chroma 双清） | `database.delete_document` + `vector_store.delete_chunks_by_source` |
@@ -119,16 +119,18 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 
 `EventSource` 不支持 POST，所以前端用 `fetch` + `res.body.getReader()` 手动读流、按空行切分事件解析（见 `app.jsx` 的 `send`）。`/api/ask`（非流式）保留，供脚本调用与兜底。
 
-### 回答反馈（👍/👎）
+### 回答反馈接口（React 界面未接入）
 
-每条回答底部有「有用 / 没用」两个按钮，点击后 `POST /api/feedback { log_id, rating }` 写回 `answer_log.rating`（`log_id` 来自 SSE 的 `done` 事件）。再点一次同一个按钮 = 撤销（传 `null`）。
+`POST /api/feedback { log_id, rating, comment? }` 把人工反馈写回 `answer_log.rating`，`log_id` 来自 `/api/ask` 的返回或 SSE 的 `done` 事件。
 
-几个设计点：
+**当前 React 界面不提供打分入口。** 这与整套质量信号的取向一致：系统用 `answer_log` 的分数**自动**判断"哪里薄"（见「问答日志」页的隐式缺口分类），不依赖使用者主动打分——个人知识库没有第三方用户，会主动点按钮的人不存在。接口与后端分流逻辑完整保留，需要时可由脚本或其他前端接入。
+
+后端行为（与界面是否接入无关）：
 
 - **反馈是稳定信号，不会被容量淘汰清掉**——`answer_log._evict` 只清理 `rating IS NULL` 的记录，人工标注过的会一直留在库里；
-- **前端先改本地状态再发请求**（乐观更新），请求失败才回滚，点按钮不会有延迟感；
 - `rating` 非法值返回 400（`set_rating` 只允许 `None / 'up' / 'down'`），`log_id` 不存在返回 404；
-- 与「问答日志」页面的关系是：那里统计的是**隐式信号**（没答上来 = 库里缺东西），这里是**显式信号**（答上来了但用户觉得没用）——两者互补，都是后续调检索 / 补文档的入口。
+- `rating = 'down'` 有联动副作用：进「待补知识」清单；若该条命中了缓存，还会**按条作废**那条缓存（开关 `FEEDBACK_CACHE_PURGE_ENABLED`）；
+- 与「问答日志」页面的关系是：那里统计的是**隐式信号**（没答上来 = 库里缺东西），这里是**显式信号**（答上来了但使用者觉得没用）——两者互补，都是后续调检索 / 补文档的入口。
 
 「问答日志」页下半部分的「最近问答」因此提供两个筛选，且**筛选在 SQL 层完成**（`list_answers` 的 `only_ungrounded` / `only_rated`），不是拉全表再在前端过滤：
 

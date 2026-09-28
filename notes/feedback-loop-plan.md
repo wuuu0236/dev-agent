@@ -13,7 +13,7 @@
 | 档 | 内容 | 状态 |
 |---|---|---|
 | **P0** | 问答现场快照（黑匣子 + 缺口清单） | ✅ **已实现** |
-| **P1** | 反馈入口（👍/👎 回标 + 可选备注） | ✅ **已实现** |
+| **P1** | 反馈入口（👍/👎 回标 + 可选备注） | ⚠️ 后端已实现；**前端入口已于 09-28 按用户要求撤除** |
 | **P2-L1** | 缓存作废（自动，**按条**） | ✅ **已实现** |
 | **P2-L2** | 待补知识清单（人工确认） | ✅ **已实现** |
 | P2-L3 | 用例沉淀（一键转 `golden_set`） | 未开始 |
@@ -22,7 +22,7 @@ P1 / P2 落地清单：
 
 | 项 | 落点 |
 |---|---|
-| P1 采集 | `answer_log.set_rating(log_id, rating, comment)`；`frontend/app.jsx` 的 👍👎；`POST /api/feedback` |
+| P1 采集 | `answer_log.set_rating(log_id, rating, comment)`；`POST /api/feedback`（React 界面的 👍👎 按钮 **09-28 按用户要求撤除**，接口与分流逻辑保留） |
 | P2-L1 自动 | `query_cache.invalidate_cached_answer()` —— **按条**作废（`clear_kb_cache` 那种整库清空粒度不够）；开关 `FEEDBACK_CACHE_PURGE_ENABLED` |
 | P2-L2 人工 | `answer_log` 的 `kb_gaps` 表 + `list_gaps / set_gap_status / get_gap`；UI 在「评估面板 → 🗂️ 待补知识」；API `GET /api/kbs/{kb_id}/gaps`、`POST /api/gaps/{gap_id}` |
 | 信号接线 | `set_rating` 一个入口负责分流：`down` → 建待办；`down` + 缓存命中 → 自动作废 + `resolved=cache_purged`；`up`/撤销 → 收回 open 待办 |
