@@ -17,7 +17,9 @@ Web API —— 给 React 前端（frontend/）提供 REST 端点
   GET    /api/kbs/{kb_id}/docs        某知识库的文档列表（viewer）
   POST   /api/ask                     RAG 问答（改写 → 检索 → 精排 → 门控 → 生成 → 引用）（viewer）
   POST   /api/ask/stream              同上，但答案用 SSE 逐块推送（前端打字机效果）（viewer）
-  POST   /api/feedback                给某条回答打反馈（viewer）
+  POST   /api/feedback                给某条回答打反馈：👍/👎 + 可选备注（viewer）
+  GET    /api/kbs/{kb_id}/gaps        待补知识清单：👎 汇成的待办（viewer）
+  POST   /api/gaps/{gap_id}           处理待补事项：done / ignored / open（editor）
   POST   /api/kbs/{kb_id}/upload      上传并入库（解析 → 切块 → 嵌入）（editor）
   POST   /api/kbs/{kb_id}/reindex     按当前参数重建索引（editor）
   DELETE /api/docs/{doc_id}           删除文档（SQLite + Chroma 双清）（editor）
@@ -276,14 +278,23 @@ class FeedbackRequest(BaseModel):
     """对某条回答的人工反馈"""
     log_id: int = Field(description="要打反馈的问答日志 id（/api/ask 或 done 事件返回）")
     rating: str | None = Field(default=None, description="'up' / 'down' / null（null = 撤销）")
+    comment: str | None = Field(
+        default=None,
+        description="可选补充说明（'哪里不对'）。只在传了值时才覆盖已有备注，"
+                    "避免前端「只点赞没写备注」把之前写的抹掉",
+    )
 
 
 @router.post("/feedback", summary="给某条回答打反馈（👍/👎）")
 def feedback(request: FeedbackRequest, user: dict = Depends(get_current_user)):
-    """把人工反馈写回 answer_log.rating。
+    """把人工反馈写回 answer_log.rating，并把信号分流到出口（反馈环 P2）。
 
     rating 只允许 None / 'up' / 'down'，非法值由 answer_log.set_rating 抛错后转 400。
     带反馈的记录不会被容量淘汰清理，因此这些标注是稳定的信号源。
+
+    👎 **不只是记一笔**：它进「待补知识」清单（`GET /kbs/{kb_id}/gaps`），
+    且当这条是缓存命中时**自动作废那条缓存**——一个错的答案被缓存后会持续错下去
+    （同一个人不会再问第二遍，所以它永远不会被自然纠正）。up / 撤销则收回该条待办。
 
     权限：入参只有 log_id，必须先查出这条日志属于哪个库才能判权限——
     否则任何登录用户都能给别人的知识库打反馈，直接污染对方的质量信号。
@@ -296,13 +307,70 @@ def feedback(request: FeedbackRequest, user: dict = Depends(get_current_user)):
     require_kb_access(log["kb_id"], user, "viewer")
 
     try:
-        hit = set_rating(request.log_id, request.rating)
+        hit = set_rating(request.log_id, request.rating, request.comment)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     if not hit:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {request.log_id}")
     return {"ok": True, "log_id": request.log_id, "rating": request.rating}
+
+
+@router.get("/kbs/{kb_id}/gaps", summary="待补知识清单（👎 汇成的待办）")
+def list_kb_gaps(kb_id: str, status: str = "open",
+                 user: dict = Depends(get_current_user)):
+    """列出该库的待补事项，每条**带原问题的现场**（gate_score / 备注 / 是否缓存命中）。
+
+    为什么把现场一起返回：处理的人要判断"该补文档还是该调检索"（分界线见
+    `answer_log.gap_stats`），只给一个问题标题的话还得回头翻日志——多一步就没人做。
+
+    `status` 传空串 = 看全部（含已处理的）。
+    """
+    from src.answer_log import count_gaps, list_gaps
+    from src.database import get_kb
+
+    if not get_kb(kb_id):
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+    require_kb_access(kb_id, user, "viewer")
+    return {
+        "kb_id": kb_id,
+        "open_count": count_gaps(kb_id, "open"),
+        "items": list_gaps(kb_id, status or None),
+    }
+
+
+class GapStatusRequest(BaseModel):
+    """待补事项的处理结果"""
+    status: str = Field(
+        description="'done'（已解决，通常是补了原文并重建索引）/ "
+                    "'ignored'（确认不用管）/ 'open'（重开）"
+    )
+
+
+@router.post("/gaps/{gap_id}", summary="处理待补事项：已解决 / 忽略 / 重开")
+def update_gap(gap_id: int, request: GapStatusRequest,
+               user: dict = Depends(get_current_user)):
+    """把一条待补事项标记成已处理，同时更新 `answer_log.resolved`。
+
+    权限比打反馈高一档（feedback 是 viewer，这里是 editor）：`done` 的语义通常是
+    "我已经补了原文并重建了索引"——那是 editor 才能做的动作。让只能提问的人把待办
+    标成已解决，清单就会失真，而**失真的清单比没有清单更糟**：它会让人以为处理过了。
+    """
+    from src.answer_log import get_gap, set_gap_status
+
+    gap = get_gap(gap_id)
+    if not gap:
+        raise HTTPException(status_code=404, detail=f"待补事项不存在: {gap_id}")
+    require_kb_access(gap["kb_id"], user, "editor")
+
+    try:
+        hit = set_gap_status(gap_id, request.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not hit:
+        raise HTTPException(status_code=404, detail=f"待补事项不存在: {gap_id}")
+    return {"ok": True, "gap_id": gap_id, "status": request.status}
 
 
 @router.post("/kbs/{kb_id}/upload", summary="上传文档并入库")

@@ -204,6 +204,7 @@ st.caption(
 
 from src.answer_log import (  # noqa: E402  （局部导入：评估面板其余部分不依赖它）
     gap_stats, list_answers, count_answers, NO_NEIGHBOR_RATIO,
+    list_gaps, set_gap_status,
 )
 from src.config import RETRIEVAL_MIN_SCORE  # noqa: E402
 
@@ -264,6 +265,57 @@ else:
         "该清缓存还是该补文档，取决于它当初为什么没通过门控。",
         _gap["unreachable"],
     )
+
+    # ---------- 待补知识清单（反馈环 P2-L2 的出口）----------
+    # 上面三档是**隐式**缺口：系统自己从分数算出来的"哪里薄"。
+    # 这里是**显式**待办：人明确点了 👎 的"哪里错了"。
+    # 两者价值不同——用户说不对的地方，往往是你自己想不到要去测的地方；
+    # 而一份只能看、不能处理的清单等于没闭环，所以每条都必须能就地处理。
+    _all_gaps = list_gaps(kb_id, None)
+    _open_gaps = [g for g in _all_gaps if g["status"] == "open"]
+    _closed_gaps = [g for g in _all_gaps if g["status"] != "open"]
+
+    with st.expander(f"🗂️ 待补知识（{len(_open_gaps)} 条待处理）", expanded=bool(_open_gaps)):
+        st.caption(
+            "来自用户的 👎。每条都带原问题的现场（相关度 / 是否缓存命中），"
+            "**先看相关度再决定动作**：分数极低 → 该补文档；分数接近阈值 → 该调检索。"
+            "处理完可以在这里直接标记，标记结果会写回该条日志的 `resolved`。"
+        )
+        if not _open_gaps:
+            st.caption("（没有待处理项）")
+
+        for _g in _open_gaps:
+            with st.container(border=True):
+                _gc1, _gc2 = st.columns([5, 1])
+                with _gc1:
+                    st.markdown(f"**{_g['question']}**")
+                    _bits = []
+                    _bits.append("—" if _g["gate_score"] is None
+                                 else f"最高相关度 {_g['gate_score']:.3f}")
+                    _bits.append("命中缓存（错的答案被缓存了）" if _g["hit_cache"] else "走了检索")
+                    _bits.append(_g["created_at"])
+                    st.caption(" · ".join(_bits))
+                    if _g["note"]:
+                        st.caption(f"💬 用户备注：{_g['note']}")
+                with _gc2:
+                    if st.button("✅ 已解决", key=f"gap_done_{_g['id']}"):
+                        set_gap_status(_g["id"], "done")
+                        st.rerun()
+                    if st.button("🙈 忽略", key=f"gap_ignore_{_g['id']}"):
+                        set_gap_status(_g["id"], "ignored")
+                        st.rerun()
+
+        if _closed_gaps:
+            st.caption("已处理（点「重开」可以放回待办）")
+            for _g in _closed_gaps:
+                _cc1, _cc2 = st.columns([5, 1])
+                with _cc1:
+                    _mark = "✅ 已解决" if _g["status"] == "done" else "🙈 已忽略"
+                    st.caption(f"{_mark} · {_g['question']}")
+                with _cc2:
+                    if st.button("重开", key=f"gap_reopen_{_g['id']}"):
+                        set_gap_status(_g["id"], "open")
+                        st.rerun()
 
     with st.expander(f"📜 明细（最近 {min(_log_total, 50)} 条）"):
         import pandas as pd

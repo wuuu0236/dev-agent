@@ -22,14 +22,35 @@ answer_log.py — 问答现场快照（反馈环 P0：黑匣子）
 ——分数在这一行被销毁，返回体里的 contexts 是清空后的。所以快照**必须在门控前抓**，
 否则事后永远不知道当时的最高分是 0.28 还是 0.02。
 
+本模块同时承载反馈环的采集与回流（P1 / P2）：
+
+  · **P1 采集** —— `set_rating()` 写入 👍/👎 与备注（`comment`）。
+  · **P2-L1 自动** —— 👎 落在**命中缓存**的记录上时，自动作废那条缓存
+    （`_purge_cached_answer` → `query_cache.invalidate_cached_answer`），
+    并把 `resolved` 记成 `cache_purged`。这档之所以敢自动，判据是**完全可逆**：
+    删错了最坏结果只是下次重算一遍。
+  · **P2-L2 人工** —— 👎 进 `kb_gaps` 待补清单；人补完原文、重建索引后标记
+    `kb_patched`，或判定无需处理标 `ignored`。`resolved` 的写入点全在这里，
+    于是"这条反馈最后被怎么处理了"事后可查——一个采集了却没人消费的反馈，
+    等于没采集。
+
+  ⚠️ L2 与设计文档（`notes/feedback-loop-plan.md` §6）有一处偏差，如实记录：
+  原方案要求「👎 **且备注提到内容错误/缺失**」才进待补清单。实现改为
+  **只要 👎 就进**。理由：判断备注里有没有提到"内容缺失"要靠关键词或 NLP，脆弱
+  且会漏——漏掉的代价是信号直接消失（用户已经表达了不满，系统却当没看见）；
+  多留一条待办的代价只是人扫一眼。清单里同时显示 `gate_score`，人一眼就能分辨
+  这是"该补文档"（分数极低）还是"该调检索"（分数接近阈值）。
+
 设计上的三条自我约束：
   1. **旁路，不阻断**：所有写入失败一律吞掉（`log_answer` 内部全包 try/except），
-     日志写得再烂也不能影响用户拿到回答。
+     日志写得再烂也不能影响用户拿到回答。P2 的自动作废同样如此——删不掉缓存
+     **绝不能**让"打反馈"这个动作本身失败。
   2. **不重复检索**：`hits` 直接复用已经算好的 contexts，绝不为了记日志再搜一次。
   3. **淘汰要保护信号**：按时间删最旧会把"被 👎 但还没处理"的记录先删掉——那正是
      这个功能的全部产出。见 `_evict()`。
 
 测试约定：顶层不 import embeddings（CI 无 key 环境），只依赖 config + citations。
+`_purge_cached_answer` 单独成函数，就是为了测试能替身它、不真调 embedding。
 """
 import json
 import sqlite3
@@ -40,9 +61,21 @@ from src.config import (
     DB_PATH, RETRIEVAL_MIN_SCORE,
     ANSWER_LOG_ENABLED, ANSWER_LOG_MAX_PER_KB,
     ANSWER_LOG_MAX_HITS, ANSWER_LOG_HIT_CHARS,
+    FEEDBACK_CACHE_PURGE_ENABLED,
 )
 
 _TABLE = "answer_log"
+_GAP_TABLE = "kb_gaps"
+
+# `resolved` 的合法取值（P2）。白名单放在这里而不是散落在调用点，是为了让
+# "这条反馈能处于哪些状态"有唯一的事实来源——否则某天写进去一个拼错的值，
+# 界面上会显示一个代码里查不到含义的字符串，而且没人会注意到。
+RESOLVED_STATES = ("none", "ignored", "cache_purged", "kb_patched", "case_added")
+
+# 待补清单的三态。与 resolved 是两个字段：gap 是"这件事处理到哪一步"，
+# resolved 是"这条反馈最终怎么解决的"。映射只写在这一处。
+GAP_STATUSES = ("open", "done", "ignored")
+_GAP_TO_RESOLVED = {"done": "kb_patched", "ignored": "ignored", "open": "none"}
 
 # 缺口分类的分界线（相对阈值，不是绝对值）。
 # 为什么用比例而不是写死 0.10：阈值本身是可配的（RETRIEVAL_MIN_SCORE）。
@@ -106,6 +139,23 @@ def _init_table():
     existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({_TABLE})")}
     if "pipeline_reason" not in existing:
         conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN pipeline_reason TEXT DEFAULT ''")
+
+    # 待补知识清单（P2-L2）。`answer_log_id` 上建**唯一索引**：幂等交给数据库约束，
+    # 而不是靠"先查再插"——后者在两个入口同时打反馈时会插出重复行，而那种重复
+    # 只有人翻清单时才会发现。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS " + _GAP_TABLE + " (\n"
+        "    id            INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+        "    kb_id         TEXT NOT NULL,\n"
+        "    answer_log_id INTEGER NOT NULL,    -- 指向 answer_log.id\n"
+        "    note          TEXT DEFAULT '',     -- 用户备注（可空）\n"
+        "    status        TEXT DEFAULT 'open', -- open / done / ignored\n"
+        "    created_at    TEXT NOT NULL\n"
+        ")"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_gaps_kb ON " + _GAP_TABLE + "(kb_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_gaps_log ON "
+                 + _GAP_TABLE + "(answer_log_id)")
     conn.commit()
     conn.close()
 
@@ -209,23 +259,219 @@ def _evict(conn, kb_id: str) -> int:
     return cur.rowcount or 0
 
 
-def set_rating(log_id: int, rating: str | None) -> bool:
-    """给某条回答打反馈：'up'（有用）/ 'down'（没用）/ None（撤销）。
+def set_rating(log_id: int, rating: str | None,
+               comment: str | None = None) -> bool:
+    """给某条回答打反馈：'up'（有用）/ 'down'（没用）/ None（撤销）。返回是否命中该条。
 
-    返回是否命中该条记录。rating 列在建表时就预留了（NULL / 'up' / 'down'），
-    这是唯一的写入口——Web 端的 👍/👎 与未来的其他入口都走这里。
-    带 rating 的记录不会被 `_evict` 的容量淘汰清掉（见该函数：只淘汰 rating IS NULL 的），
-    所以人工标注过的信号不会意外丢失。
+    **这是反馈环唯一的采集入口**，同时负责把信号分流到出口（P2）——收到信号却
+    没人消费，等于没采集：
+
+      · `down`            → 进 `kb_gaps` 待补清单（人工处理，见 list_gaps）
+      · `down` + 缓存命中 → 自动作废那条缓存，`resolved='cache_purged'`（P2-L1）
+      · `up` / `None`     → 收回该条的 open 待办（撤回信号，不该留下待办垃圾）
+      · 带 `comment`      → 一并落库，清单里显示（帮人判断该补文档还是该调检索）
+
+    带 rating 的记录不会被 `_evict` 的容量淘汰清掉（见该函数：只淘汰 rating IS NULL
+    的），所以人工标注过的信号不会意外丢失。
+
+    `comment` 只在传入非 None 时覆盖：前端"只点个赞、没写备注"不该把之前写的
+    备注抹掉——那属于静默丢数据。
     """
     if rating not in (None, "up", "down"):
         raise ValueError(f"rating 只能是 None / 'up' / 'down'，收到：{rating!r}")
 
     _init_table()
     conn = _connect()
-    cur = conn.execute("UPDATE " + _TABLE + " SET rating = ? WHERE id = ?", (rating, log_id))
+    row = conn.execute(
+        "SELECT kb_id, question, hit_cache FROM " + _TABLE + " WHERE id = ?", (log_id,)
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return False
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if comment is None:
+        cur = conn.execute("UPDATE " + _TABLE + " SET rating = ?, rated_at = ? WHERE id = ?",
+                           (rating, now, log_id))
+    else:
+        cur = conn.execute(
+            "UPDATE " + _TABLE + " SET rating = ?, comment = ?, rated_at = ? WHERE id = ?",
+            (rating, comment, now, log_id),
+        )
+    hit = bool(cur.rowcount)
+    kb_id, question, hit_cache = row["kb_id"], row["question"], bool(row["hit_cache"])
+
+    # 分流与评分写在同一个事务里：否则会出现"rating 存了、待办没建"的半截状态，
+    # 而人只会发现"我明明点了 👎，清单里却没有"，无从判断是没生效还是漏了。
+    if rating == "down":
+        conn.execute(
+            "INSERT INTO " + _GAP_TABLE + " (kb_id, answer_log_id, note, status, created_at)"
+            " VALUES (?, ?, ?, 'open', ?)"
+            " ON CONFLICT(answer_log_id) DO UPDATE SET"
+            "   note   = CASE WHEN excluded.note = '' THEN note ELSE excluded.note END,"
+            "   status = 'open'",
+            (kb_id, log_id, comment or "", now),
+        )
+    else:
+        # 撤回信号 = 收回待办。已 done / ignored 的不动：那说明人已经处理过了，
+        # 用户改主意不该让处理记录消失。
+        conn.execute(
+            "DELETE FROM " + _GAP_TABLE + " WHERE answer_log_id = ? AND status = 'open'",
+            (log_id,),
+        )
     conn.commit()
     conn.close()
-    return bool(cur.rowcount)
+
+    # P2-L1：错的答案被缓存了 → 它不会自己消失（同一个人不会再问第二遍，
+    # 所以这条错永远不会被自然纠正）。这是唯一能被自动修掉的一类错。
+    # 放在事务提交**之后**：作废缓存要走一次 embedding，网络慢的时候不该让
+    # "打反馈"这个动作卡住等它。
+    if rating == "down" and hit_cache and FEEDBACK_CACHE_PURGE_ENABLED:
+        if _purge_cached_answer(kb_id, question):
+            mark_resolved(log_id, "cache_purged")
+    return hit
+
+
+def _purge_cached_answer(kb_id: str, question: str) -> bool:
+    """作废那条毒缓存（P2-L1 的实际动作），返回是否删到。
+
+    单独成函数有两个原因：① 惰性 import，本模块顶层不碰 embedding，CI 无 key
+    环境照样能 import；② 测试可以替身它——不必真调 embedding 也能验证
+    "👎 且缓存命中 → 确实走了作废这条路"。
+    """
+    try:
+        from src.query_cache import invalidate_cached_answer
+        return invalidate_cached_answer(kb_id, question)
+    except Exception as e:
+        print(f"[AnswerLog] 作废缓存失败（不影响反馈本身）: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        return False
+
+
+def mark_resolved(log_id: int, resolved: str) -> bool:
+    """标记这条反馈最终怎么处理的（P2）。白名单外的值直接抛错。返回是否命中该条。
+
+    为什么必须显式标记：`resolved` 是"闭环走到哪一步"的唯一凭证。采集了却不
+    消费的反馈等于没采集——事后没法区分「还没人看」和「看过、决定不改」，
+    于是同一批问题会被重复处理，处理过的问题又会被重复怀疑。
+    """
+    if resolved not in RESOLVED_STATES:
+        raise ValueError(f"resolved 只能是 {RESOLVED_STATES} 之一，收到：{resolved!r}")
+    _init_table()
+    conn = _connect()
+    cur = conn.execute("UPDATE " + _TABLE + " SET resolved = ? WHERE id = ?",
+                       (resolved, log_id))
+    hit = bool(cur.rowcount)
+    conn.commit()
+    conn.close()
+    return hit
+
+
+# ---------- 待补知识清单（P2-L2）----------
+
+def list_gaps(kb_id: str | None = None, status: str | None = "open",
+              limit: int = 200) -> list[dict]:
+    """列出待补知识清单（默认只看 open）。给界面用。
+
+    返回的每条**带上原问题的现场**（question / gate_score / hit_cache）：因为
+    "该补文档还是该调检索"要靠 `gate_score` 判断（分界线见 gap_stats），
+    只给一个问题标题的话，处理的人还得回头翻日志——多这一步就会没人做。
+
+    `status=None` 表示不筛状态（看全部历史）。
+    """
+    _init_table()
+    where, args = [], []
+    if kb_id:
+        where.append("g.kb_id = ?")
+        args.append(kb_id)
+    if status:
+        where.append("g.status = ?")
+        args.append(status)
+    sql = ("SELECT g.id, g.kb_id, g.answer_log_id, g.note, g.status, g.created_at,"
+           "       a.question, a.retrieval_query, a.gate_score, a.hit_cache,"
+           "       a.rating, a.comment"
+           "  FROM " + _GAP_TABLE + " g"
+           "  LEFT JOIN " + _TABLE + " a ON a.id = g.answer_log_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY g.id DESC LIMIT ?"
+    args.append(int(limit))
+
+    conn = _connect()
+    rows = conn.execute(sql, tuple(args)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_gaps(kb_id: str | None = None, status: str | None = "open") -> int:
+    """待补事项条数（`status=None` 数全部）。界面上的角标用。"""
+    _init_table()
+    where, args = [], []
+    if kb_id:
+        where.append("kb_id = ?")
+        args.append(kb_id)
+    if status:
+        where.append("status = ?")
+        args.append(status)
+    sql = "SELECT COUNT(*) AS c FROM " + _GAP_TABLE
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    conn = _connect()
+    row = conn.execute(sql, tuple(args)).fetchone()
+    conn.close()
+    return row["c"]
+
+
+def get_gap(gap_id: int) -> dict | None:
+    """按 id 取一条待补事项（含原问题现场），不存在返回 None。
+
+    接口层判权限前必须先知道它属于哪个库——否则任何登录用户都能标记别人的
+    待办，直接污染对方的质量信号（同 `/api/feedback` 的理由）。
+    """
+    _init_table()
+    conn = _connect()
+    row = conn.execute(
+        "SELECT g.id, g.kb_id, g.answer_log_id, g.note, g.status, g.created_at,"
+        "       a.question, a.gate_score, a.hit_cache"
+        "  FROM " + _GAP_TABLE + " g"
+        "  LEFT JOIN " + _TABLE + " a ON a.id = g.answer_log_id"
+        " WHERE g.id = ?", (gap_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_gap_status(gap_id: int, status: str) -> bool:
+    """处理一条待补事项：done（已解决）/ ignored（确认不用管）/ open（重开）。
+
+    同时更新对应的 `resolved`——两个字段分开写迟早会出现"清单里已完成、日志里
+    还显示未处理"的错位，而那种错位没人会主动去核对。
+    """
+    if status not in GAP_STATUSES:
+        raise ValueError(f"status 只能是 {GAP_STATUSES} 之一，收到：{status!r}")
+    _init_table()
+    conn = _connect()
+    cur = conn.execute("UPDATE " + _GAP_TABLE + " SET status = ? WHERE id = ?",
+                       (status, gap_id))
+    hit = bool(cur.rowcount)
+    row = conn.execute("SELECT answer_log_id FROM " + _GAP_TABLE + " WHERE id = ?",
+                       (gap_id,)).fetchone()
+    conn.commit()
+    conn.close()
+    if row is not None:
+        mark_resolved(row["answer_log_id"], _GAP_TO_RESOLVED[status])
+    return hit
+
+
+def clear_kb_gaps(kb_id: str) -> int:
+    """清空某知识库的待补清单，返回删除条数。"""
+    _init_table()
+    conn = _connect()
+    cur = conn.execute("DELETE FROM " + _GAP_TABLE + " WHERE kb_id = ?", (kb_id,))
+    n = cur.rowcount or 0
+    conn.commit()
+    conn.close()
+    return n
 
 
 def get_answer(log_id: int) -> dict | None:
@@ -339,9 +585,12 @@ def clear_kb_log(kb_id: str) -> int:
     """清空某知识库的问答日志，返回删除条数。
 
     与「删文档三处同删」同源：知识库没了，引用它的日志就是孤儿数据。
+    待补清单（`kb_gaps`）一并清掉——它的 `answer_log_id` 指向的正是这批日志，
+    留着会变成点进去看不到任何现场的空壳待办。
     """
     _init_table()
     conn = _connect()
+    conn.execute("DELETE FROM " + _GAP_TABLE + " WHERE kb_id = ?", (kb_id,))
     cur = conn.execute("DELETE FROM " + _TABLE + " WHERE kb_id = ?", (kb_id,))
     n = cur.rowcount or 0
     conn.commit()

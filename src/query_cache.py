@@ -16,6 +16,7 @@ _embed 惰性 import，测试用固定向量 monkeypatch。
 import json
 import os
 import struct
+import sys
 from datetime import datetime
 
 import numpy as np
@@ -153,3 +154,51 @@ def clear_kb_cache(kb_id: str):
     conn.execute(f"DELETE FROM {_CACHE_TABLE} WHERE kb_id = ?", (kb_id,))
     conn.commit()
     conn.close()
+
+
+def invalidate_cached_answer(kb_id: str, question: str) -> bool:
+    """按语义作废**一条**缓存，返回是否真的删到了（反馈环 P2-L1）。
+
+    与 `clear_kb_cache` 的区别只在粒度，但触发场景完全不同：那个是"知识库变了，
+    整库缓存全部作废"；这个是"用户说这条答错了，而它恰好是缓存给出的"。
+
+    为什么必须支持单条：👎 一条缓存命中的记录，含义是**这段错的答案被缓存了，
+    会持续错下去**——同一个人不会问第二遍，所以它永远不会被自然纠正。但改用
+    整库清空的话，会顺带干掉几百条正常缓存（下次全部重算），删一条错答案的
+    代价变成一整库的重算，不划算。
+
+    匹配逻辑与 `get_cached_answer` **逐行一致**（同一个 `_embed` / `_cosine` /
+    同一个阈值）。这不是巧合：两边但凡有一点不一致，就会出现"存的时候能命中、
+    删的时候删不掉"的不对称——而这种 bug 是静默的，用户以为删了，下次照旧吐出
+    同一个错答案。
+
+    失败（无 key / 网络抖动）一律返回 False 且不抛：它是旁路动作，绝不能因为
+    删不掉缓存，就让"打反馈"这个操作本身失败。
+    """
+    if not QUERY_CACHE_ENABLED:
+        return False
+    try:
+        _init_table()
+        q_vec = _embed(question)
+        conn = _connect()
+        rows = conn.execute(
+            f"SELECT rowid, embedding FROM {_CACHE_TABLE}"
+            f" WHERE kb_id = ? AND vec_ver = ?",
+            (kb_id, CACHE_VEC_VERSION),
+        ).fetchall()
+        best_rowid, best_sim = None, QUERY_CACHE_THRESHOLD
+        for row in rows:
+            sim = _cosine(q_vec, _unpack(row["embedding"]))
+            if sim >= best_sim:
+                best_sim, best_rowid = sim, row["rowid"]
+        if best_rowid is None:
+            conn.close()
+            return False
+        conn.execute(f"DELETE FROM {_CACHE_TABLE} WHERE rowid = ?", (best_rowid,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[QueryCache] 作废单条缓存失败（旁路，不影响反馈本身）: "
+              f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return False
