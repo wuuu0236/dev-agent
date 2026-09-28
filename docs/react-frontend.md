@@ -58,7 +58,7 @@ npm run build      # 改完 app.jsx 后重跑
 | 知识库管理 | `pages/1_📚_知识库管理.py` | 统计卡片（文档数 / chunk 数 / 索引状态）+ 文档列表（就绪/解析中/失败状态标签、重建索引入口） |
 | 文档上传 | `pages/2_📄_文档上传.py` | 拖拽上传 + 模拟进度条 + 解析选项开关（清洗管线 / 本地 OCR / Word 表格序列化） |
 | 评估面板 | `pages/4_📊_评估面板.py` | RAGAS 四维雷达图（手写 SVG，无图表库依赖）+ 历史趋势柱状图 + 多配置对比表 |
-| 问答日志 | Streamlit 内嵌于评估面板 | 未命中问题按最高精排分分档：「差点过阈→调检索」/「无语义邻居→补文档」两张待办清单 |
+| 问答日志 | Streamlit 内嵌于评估面板 | 未命中问题按最高精排分分档：「差点过阈→调检索」/「无语义邻居→补文档」两类缺口 |
 
 组件全部为函数组件 + Hooks（`useState / useRef / useEffect`），无路由库（顶层 `page` state 切页）、无 UI 框架（手写 CSS 变量主题）、无图表库（雷达图/柱状图为手写 SVG）——保持产物精简。
 
@@ -69,7 +69,7 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 - **引用**：`citations` 里每条有 `file / page / score / snip`，对应 `src/citations.py` 的"序号→真实来源映射 + 命中原文"；
 - **门控**：问"天气/大盘"类问题时前端返回拒答话术，对应 `src/answer_gate.py` 的阈值拒答（阈值 0.3）；
 - **评估**：RAGAS 四指标（Context Precision / Recall、Faithfulness、Answer Relevancy，0-100）对应 `src/evaluation_ragas.py`；
-- **问答日志**：两类待办分档对应 `src/answer_log.py` 的反馈环设计。
+- **问答日志**：缺口分档对应 `src/answer_log.py` 的 `gap_stats`。
 
 ## 5. 后端接口（`src/api/web_api.py`）
 
@@ -82,11 +82,10 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 | `/api/kbs/{kb_id}/docs` | GET | 文档列表 + 统计 | `database.list_documents` |
 | `/api/ask` | POST | RAG 问答：question + kb_id + history（最近 6 轮） | `rag_qa.rag_query` 全链路 |
 | `/api/ask/stream` | POST | 同上，答案用 SSE 逐块推送（前端打字机效果） | `rag_qa.stream_rag_query` |
-| `/api/feedback` | POST | 给某条回答打 👍/👎（`rating = 'up' / 'down' / null`）。**React 界面未接入**，接口保留供脚本 / 其他前端调用 | `answer_log.set_rating` |
 | `/api/kbs/{kb_id}/upload` | POST | 上传入库（multipart） | `parser.parse_file` → `chunker.chunk_parsed` → `vector_store.add_chunks` |
 | `/api/kbs/{kb_id}/reindex` | POST | 按当前参数重建索引 | `reindex.rebuild_kb` |
 | `/api/docs/{doc_id}` | DELETE | 删文档（SQLite + Chroma 双清） | `database.delete_document` + `vector_store.delete_chunks_by_source` |
-| `/api/answer_log` | GET | 问答日志 + 缺口分类；支持 `only_ungrounded` / `only_rated` 筛选 | `answer_log.gap_stats` / `list_answers` / `count_answers` |
+| `/api/answer_log` | GET | 问答日志 + 缺口分类；支持 `only_ungrounded` 筛选 | `answer_log.gap_stats` / `list_answers` / `count_answers` |
 | `/api/eval/history` | GET | RAGAS 评估存档列表 | `evaluation_ragas.list_history` |
 | `/api/eval/history/{file}` | GET | 某份存档完整结果 | `evaluation_ragas.load_history` |
 
@@ -119,23 +118,9 @@ mock 数据刻意按真实系统的口径编写，讲解时可直接对照：
 
 `EventSource` 不支持 POST，所以前端用 `fetch` + `res.body.getReader()` 手动读流、按空行切分事件解析（见 `app.jsx` 的 `send`）。`/api/ask`（非流式）保留，供脚本调用与兜底。
 
-### 回答反馈接口（React 界面未接入）
+「问答日志」页下半部分的「最近问答」提供「只看未命中」筛选，且**筛选在 SQL 层完成**（`list_answers` 的 `only_ungrounded`），不是拉全表再在前端过滤：
 
-`POST /api/feedback { log_id, rating, comment? }` 把人工反馈写回 `answer_log.rating`，`log_id` 来自 `/api/ask` 的返回或 SSE 的 `done` 事件。
-
-**当前 React 界面不提供打分入口。** 这与整套质量信号的取向一致：系统用 `answer_log` 的分数**自动**判断"哪里薄"（见「问答日志」页的隐式缺口分类），不依赖使用者主动打分——个人知识库没有第三方用户，会主动点按钮的人不存在。接口与后端分流逻辑完整保留，需要时可由脚本或其他前端接入。
-
-后端行为（与界面是否接入无关）：
-
-- **反馈是稳定信号，不会被容量淘汰清掉**——`answer_log._evict` 只清理 `rating IS NULL` 的记录，人工标注过的会一直留在库里；
-- `rating` 非法值返回 400（`set_rating` 只允许 `None / 'up' / 'down'`），`log_id` 不存在返回 404；
-- `rating = 'down'` 有联动副作用：进「待补知识」清单；若该条命中了缓存，还会**按条作废**那条缓存（开关 `FEEDBACK_CACHE_PURGE_ENABLED`）；
-- 与「问答日志」页面的关系是：那里统计的是**隐式信号**（没答上来 = 库里缺东西），这里是**显式信号**（答上来了但使用者觉得没用）——两者互补，都是后续调检索 / 补文档的入口。
-
-「问答日志」页下半部分的「最近问答」因此提供两个筛选，且**筛选在 SQL 层完成**（`list_answers` 的 `only_ungrounded` / `only_rated`），不是拉全表再在前端过滤：
-
-- `only_ungrounded=true` —— 隐式信号：门控没过，库里撑不住这个问法；
-- `only_rated=true` —— 显式信号：用户点过 👍/👎 的记录，含「答上了但没用」。
+- `only_ungrounded=true` —— 门控没过，库里撑不住这个问法。
 
 部署相关：FastAPI 加了 CORS（`allow_origins=["*"]`，本机服务 + 允许 `file://` 直开调试），并把 `frontend/` 目录挂在 `/app` 静态托管，因此前端用相对路径即可，不需要配置 API 地址。上传接口依赖 `python-multipart`（已加入 `requirements.txt`），缺了会在定义路由时直接抛 `RuntimeError`。
 

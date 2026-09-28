@@ -261,7 +261,7 @@ full_text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 **这个 bug 至今零测试覆盖**——CI 跑了全会通过。这是"测试存在但不覆盖真实风险"的典型。
 
 > ✅ **2026-09-14 已修复**：`parse_docx()` 改为按 `doc.element.body` 的真实阅读顺序迭代段落与表格，表格序列化为行式自包含文本（`- 列名：值；列名：值`）；新增 `tests/test_parser_docx.py`（23 条，含直接钉死本 bug 的回归测试）与端到端清洗验证。全量 213 passed。
-> 详见 `rag-six-stages.md` §11。**本节其余内容为当时的原始记录，未作改写。**
+> **本节其余内容为当时的原始记录，未作改写。**
 
 ---
 

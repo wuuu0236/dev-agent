@@ -105,7 +105,7 @@
 **一句话**：trace 是显微镜，指标是仪表盘。
 
 **三支柱**：日志（发生了什么）/ 指标（多少、多快）/ 追踪（卡在哪一环）。
-**项目已有**：Langfuse 追踪（RAG + Agent）。**待补**：结构化日志、Sentry、Prometheus+Grafana、告警。
+**项目已有**：Langfuse 追踪（RAG + Agent），token 消耗与延迟由 SDK 自动采集。
 
 ---
 
